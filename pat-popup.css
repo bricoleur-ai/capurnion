@@ -1,0 +1,11 @@
+body { width: 430px; margin: 18px; color: #202124; font: 13px/1.5 system-ui, sans-serif; }
+h1 { font-size: 18px; margin: 0; }
+p { margin: 9px 0; }
+#status { font-weight: 600; }
+#error { color: #a32118; white-space: pre-line; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 12px 0; }
+th, td { text-align: left; padding: 7px 4px; border-bottom: 1px solid #ddd; overflow-wrap: anywhere; }
+.controls { display: flex; gap: 8px; align-items: center; margin-top: 14px; }
+button { padding: 6px 10px; border: 1px solid #aaa; border-radius: 5px; background: #fff; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+a { color: #2459a6; margin-left: auto; }

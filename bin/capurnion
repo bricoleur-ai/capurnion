@@ -1,0 +1,619 @@
+#!/usr/bin/env python3
+"""capurnion -- manage login rules, Snowflake PAT renewal, and a local encrypted vault.
+
+rules.json is the single source of truth. manifest.json and rules.generated.js
+are both GENERATED from it by `capurnion sync`; never edit them by hand.
+"""
+import argparse, hashlib, json, os, re, shutil, subprocess, sys
+from urllib.parse import urlparse
+
+# realpath, not abspath: this script is symlinked onto PATH from ~/.local/bin,
+# and abspath would resolve ROOT to the symlink's directory instead of the repo.
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+RULES = os.path.join(ROOT, "rules.json")
+MANIFEST = os.path.join(ROOT, "manifest.json")
+GENERATED = os.path.join(ROOT, "rules.generated.js")
+EXAMPLE = os.path.join(ROOT, "rules.example.json")
+PROBE = os.path.join(ROOT, "tools", "probe.js")
+
+EXT_NAME = "Capurnion — SSO/OAuth login auto-click"
+EXT_VERSION = "1.0.0"
+KINDS = ("idp-select", "session-continue", "consent-grant")
+PLACEHOLDER = re.compile(r"REPLACE-ME", re.I)
+
+if sys.stdout.isatty():
+    B, DIM, R, RED, GRN, YEL = "\033[1m", "\033[2m", "\033[0m", "\033[31m", "\033[32m", "\033[33m"
+else:
+    B = DIM = R = RED = GRN = YEL = ""
+
+
+def load():
+    try:
+        with open(RULES) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        sys.exit(f"{RED}no rules.json at {RULES}{R}\n"
+                 f"This is your private config and is not in git. Create it with: capurnion init")
+    except json.JSONDecodeError as e:
+        sys.exit(f"{RED}rules.json is not valid JSON: {e}{R}")
+
+
+def save(cfg):
+    tmp = RULES + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, RULES)
+
+
+def sha256_file(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def chrome_extension_id(path):
+    """Chrome derives an unpacked extension's ID from its absolute path:
+    sha256(path), first 32 hex digits, each mapped 0-f -> a-p."""
+    digest = hashlib.sha256(path.encode()).hexdigest()[:32]
+    return "".join(chr(ord("a") + int(c, 16)) for c in digest)
+
+
+# ---------------- validation ----------------
+
+def validate(cfg):
+    """Returns (errors, warnings). Errors mean the rule set must not ship."""
+    errs, warns = [], []
+    if cfg.get("version") != 1:
+        errs.append(f"top-level \"version\" must be 1, got {cfg.get('version')!r}")
+    rules = cfg.get("rules")
+    if not isinstance(rules, list):
+        errs.append('top-level "rules" must be a list')
+        return errs, warns
+
+    seen = set()
+    for i, r in enumerate(rules):
+        where = f'rule[{i}]'
+        if not isinstance(r, dict):
+            errs.append(f"{where} is not an object"); continue
+        rid = r.get("id")
+        where = f'rule "{rid}"' if rid else where
+        if not isinstance(rid, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", rid or ""):
+            errs.append(f"{where}: id must be lowercase letters/digits/dashes")
+        elif rid in seen:
+            errs.append(f"{where}: duplicate id")
+        else:
+            seen.add(rid)
+
+        if not isinstance(r.get("enabled"), bool):
+            errs.append(f"{where}: enabled must be true or false")
+        if r.get("kind") not in KINDS:
+            errs.append(f"{where}: kind must be one of {', '.join(KINDS)}")
+        if not isinstance(r.get("description"), str) or not r.get("description"):
+            warns.append(f"{where}: no description -- agents rely on it")
+
+        hosts = r.get("hosts")
+        if not isinstance(hosts, list) or not hosts or not all(isinstance(h, str) and h for h in hosts):
+            errs.append(f"{where}: hosts must be a non-empty list of hostnames")
+        else:
+            for h in hosts:
+                if "/" in h or ":" in h:
+                    errs.append(f"{where}: host {h!r} must be a bare hostname (no scheme, port or path)")
+                if PLACEHOLDER.search(h) and r.get("enabled"):
+                    errs.append(f"{where}: enabled but host {h!r} is still a placeholder")
+
+        click = r.get("click")
+        if not isinstance(click, dict) or not isinstance(click.get("label"), str):
+            errs.append(f"{where}: click.label is required (case-insensitive regex)")
+        else:
+            try:
+                re.compile(click["label"])
+            except re.error as e:
+                errs.append(f"{where}: click.label is not a valid regex ({e})")
+            if not isinstance(click.get("selector", ""), str):
+                errs.append(f"{where}: click.selector must be a string")
+
+        req = r.get("require", {})
+        if not isinstance(req, dict):
+            errs.append(f"{where}: require must be an object")
+        else:
+            for field in ("pageText", "url"):
+                if field in req:
+                    if not isinstance(req[field], str):
+                        errs.append(f"{where}: require.{field} must be a string")
+                    else:
+                        try:
+                            re.compile(req[field])
+                        except re.error as e:
+                            errs.append(f"{where}: require.{field} is not a valid regex ({e})")
+            if not req and r.get("enabled"):
+                warns.append(f"{where}: no require guard -- it will click on any page of those hosts")
+
+        opts = r.get("options", {})
+        if not isinstance(opts, dict):
+            errs.append(f"{where}: options must be an object")
+        else:
+            for field in ("timeoutMs", "delayMs"):
+                if field in opts and (not isinstance(opts[field], int) or opts[field] < 0):
+                    errs.append(f"{where}: options.{field} must be a non-negative integer")
+
+        if r.get("kind") == "consent-grant" and r.get("enabled"):
+            if r.get("confirmGrantsAccess") is not True:
+                errs.append(
+                    f'{where}: kind=consent-grant is enabled but "confirmGrantsAccess" is not true '
+                    f"-- the engine would silently skip it")
+            else:
+                warns.append(
+                    f"{where}: GRANTS ACCESS. It clicks an OAuth consent button on "
+                    f"{', '.join(r.get('hosts') or [])} without you reading the screen.")
+        if r.get("allFrames") not in (None, True, False):
+            errs.append(f"{where}: allFrames must be true or false")
+    pat = cfg.get("snowflakePat")
+    if pat is not None:
+        if not isinstance(pat, dict):
+            errs.append("snowflakePat must be an object")
+        else:
+            if not isinstance(pat.get("enabled"), bool):
+                errs.append("snowflakePat.enabled must be true or false")
+            url = pat.get("url", "")
+            if not isinstance(url, str) or not re.fullmatch(
+                    r"https://app\.snowflake\.com/[a-z0-9_-]+/[a-z0-9_-]+/settings/authentication", url):
+                errs.append("snowflakePat.url must name one exact HTTPS Snowflake account authentication page")
+            for key, value in (("intervalMinutes", 60), ("renewBelowMinutes", 120), ("grantHours", 24)):
+                if type(pat.get(key)) is not int or pat[key] != value:
+                    errs.append(f"snowflakePat.{key} must be {value}")
+            if not isinstance(pat.get("expectedUser"), str) or not pat.get("expectedUser", "").strip():
+                errs.append("snowflakePat.expectedUser must name the signed-in Snowflake user")
+            if pat.get("enabled") and pat.get("confirmGrantsAccess") is not True:
+                errs.append("snowflakePat requires confirmGrantsAccess: true when enabled")
+            if pat.get("enabled") and isinstance(url, str) and PLACEHOLDER.search(url):
+                errs.append("snowflakePat.url still contains a placeholder")
+    vault = cfg.get("vault")
+    if vault is not None and (not isinstance(vault, dict) or not isinstance(vault.get("enabled"), bool)):
+        errs.append("vault must be an object with enabled: true or false")
+    okta = cfg.get("oktaLogin")
+    if okta is not None:
+        if not isinstance(okta, dict):
+            errs.append("oktaLogin must be an object")
+        else:
+            if not isinstance(okta.get("enabled"), bool):
+                errs.append("oktaLogin.enabled must be true or false")
+            host = okta.get("host", "")
+            if not isinstance(host, str) or not host or "/" in host or ":" in host:
+                errs.append("oktaLogin.host must be a bare hostname (e.g. tenant.okta.com)")
+            elif PLACEHOLDER.search(host) and okta.get("enabled"):
+                errs.append("oktaLogin.host is still a placeholder")
+            url = okta.get("smsCodeUrl", "")
+            if not isinstance(url, str) or not re.match(r"https?://[^/]+/", url):
+                errs.append("oktaLogin.smsCodeUrl must be the 2fu code URL (http(s)://host[:port]/path)")
+            for key in ("usernameSecret", "passwordSecret"):
+                if key in okta and (not isinstance(okta[key], str) or not okta[key].strip()):
+                    errs.append(f"oktaLogin.{key} must be a non-empty vault secret name")
+            if okta.get("enabled"):
+                if okta.get("confirmAutomatesMfa") is not True:
+                    errs.append('oktaLogin is enabled but "confirmAutomatesMfa" is not true '
+                                "-- it fills your password and completes your SMS second factor; opt in deliberately")
+                if not isinstance(vault, dict) or not vault.get("enabled"):
+                    errs.append("oktaLogin requires vault.enabled: true -- the username and password come from the vault")
+    return errs, warns
+
+
+def report(errs, warns, quiet_ok=False):
+    for w in warns:
+        print(f"  {YEL}warn{R}  {w}")
+    for e in errs:
+        print(f"  {RED}error{R} {e}")
+    if errs:
+        print(f"\n{RED}{len(errs)} error(s) -- not written{R}")
+        sys.exit(1)
+    if not quiet_ok:
+        print(f"  {GRN}rules.json is valid{R}" + (f" ({len(warns)} warning(s))" if warns else ""))
+
+
+# ---------------- commands ----------------
+
+def cmd_validate(args):
+    cfg = load()
+    errs, warns = validate(cfg)
+    report(errs, warns)
+
+
+def cmd_list(args):
+    cfg = load()
+    print(f"{B}{'ID':34} {'ON':4} {'KIND':17} HOSTS{R}")
+    for r in cfg.get("rules", []):
+        on = f"{GRN}yes{R}" if r.get("enabled") else f"{DIM}no {R}"
+        hosts = ", ".join(r.get("hosts") or [])
+        if len(hosts) > 48:
+            hosts = hosts[:45] + "..."
+        print(f"  {r.get('id',''):32} {on}  {r.get('kind',''):17} {hosts}")
+    enabled = sum(1 for r in cfg.get("rules", []) if r.get("enabled"))
+    print(f"\n  {len(cfg.get('rules', []))} rules, {enabled} enabled")
+    if cfg.get("snowflakePat"):
+        pat = cfg["snowflakePat"]
+        print(f"  Snowflake PAT renewal: {'enabled' if pat['enabled'] else 'disabled'} (hourly)")
+    if cfg.get("oktaLogin"):
+        okta = cfg["oktaLogin"]
+        print(f"  Okta auto-login: {'enabled' if okta.get('enabled') else 'disabled'} ({okta.get('host','?')}, vault creds + 2fu SMS)")
+
+
+def cmd_sync(args):
+    cfg = load()
+    errs, warns = validate(cfg)
+    report(errs, warns, quiet_ok=True)
+
+    enabled = [r for r in cfg["rules"] if r.get("enabled")]
+    groups = {False: [], True: []}
+    for r in enabled:
+        groups[bool(r.get("allFrames"))].extend(r["hosts"])
+
+    scripts = []
+    for all_frames in (False, True):
+        hosts = sorted(set(groups[all_frames]))
+        if not hosts:
+            continue
+        scripts.append({
+            "matches": [f"*://{h}/*" for h in hosts],
+            "js": ["rules.generated.js", "matcher.js", "engine.js"],
+            "run_at": "document_idle",
+            "all_frames": all_frames,
+        })
+
+    manifest = {
+        "manifest_version": 3,
+        "name": EXT_NAME,
+        "version": EXT_VERSION,
+        "description": "Clicks 'Sign in with <provider>' SSO buttons, driven by rules.json.",
+        "_comment": "GENERATED by `capurnion sync` from rules.json. Do not edit this file; edit rules.json and re-run sync.",
+    }
+    pat = cfg.get("snowflakePat", {})
+    if pat.get("enabled"):
+        scripts.append({
+            "matches": [pat["url"]],
+            "js": ["rules.generated.js", "snowflake-pat.js", "snowflake-pat-content.js"],
+            "run_at": "document_idle",
+            "all_frames": False,
+        })
+        manifest["minimum_chrome_version"] = "120"
+        manifest["permissions"] = ["alarms", "storage"]
+        manifest["background"] = {"service_worker": "background.js"}
+        manifest["action"] = {"default_title": "Capurnion — Snowflake PAT renewal", "default_popup": "pat-popup.html"}
+    vault = cfg.get("vault", {})
+    if vault.get("enabled"):
+        manifest["minimum_chrome_version"] = "120"
+        manifest.setdefault("permissions", ["storage"])
+        # The device decryption key must survive storage eviction as well as restarts.
+        manifest["permissions"].append("unlimitedStorage")
+        manifest["background"] = {"service_worker": "background.js"}
+        manifest.setdefault("action", {"default_title": "Capurnion settings and vault"})
+        manifest["options_ui"] = {"page": "options.html", "open_in_tab": True}
+    okta = cfg.get("oktaLogin", {})
+    if okta.get("enabled"):
+        scripts.append({
+            "matches": [f"https://{okta['host']}/*"],
+            "js": ["rules.generated.js", "okta-login-flow.js", "okta-login-content.js"],
+            "run_at": "document_idle",
+            "all_frames": False,
+        })
+        manifest["minimum_chrome_version"] = "120"
+        manifest.setdefault("permissions", ["storage"])
+        manifest["background"] = {"service_worker": "background.js"}
+        # The service worker fetches the SMS code from the 2fu origin.
+        parsed = urlparse(okta["smsCodeUrl"])
+        netloc = parsed.hostname + (f":{parsed.port}" if parsed.port else "")
+        origin = f"{parsed.scheme}://{netloc}/*"
+        manifest.setdefault("host_permissions", [])
+        if origin not in manifest["host_permissions"]:
+            manifest["host_permissions"].append(origin)
+    # Omit the key entirely rather than shipping an empty list, which Chrome warns on.
+    if scripts:
+        manifest["content_scripts"] = scripts
+    with open(MANIFEST, "w") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+    payload = {"version": cfg["version"], "rules": enabled}
+    if pat.get("enabled"):
+        payload["snowflakePat"] = pat
+    if vault.get("enabled"):
+        payload["vault"] = {"enabled": True}
+    if okta.get("enabled"):
+        payload["oktaLogin"] = okta
+    src_hash = sha256_file(RULES)
+    with open(GENERATED, "w") as f:
+        f.write("// GENERATED by `capurnion sync` from rules.json -- do not edit.\n")
+        f.write(f"// source-sha256: {src_hash}\n")
+        f.write("// Only enabled rules are shipped; disabled rules cost no host permissions.\n")
+        f.write("globalThis.CAPURNION_RULES = ")
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+        f.write(";\n")
+
+    hosts_total = sorted({h for r in enabled for h in r["hosts"]})
+    print(f"  {GRN}synced{R} {len(enabled)} enabled rule(s) over {len(hosts_total)} host(s):")
+    for h in hosts_total:
+        print(f"    {h}")
+    if not scripts and not vault.get("enabled"):
+        print(f"  {YEL}no enabled rules -- the extension will do nothing{R}")
+    if pat.get("enabled"):
+        print("  Snowflake PAT renewal: hourly; below 2 hours -> grant 24 hours")
+    if vault.get("enabled"):
+        print("  Local encrypted vault: extension Options -> manage secrets; automation access persists while management is locked")
+    if okta.get("enabled"):
+        print(f"  Okta auto-login: {okta['host']} -> fills email+password from the vault, completes SMS via 2fu")
+    print(f"\n  {B}Now reload it:{R} chrome://extensions -> Capurnion -> the reload arrow")
+    print(f"  {DIM}(content scripts and manifest changes are not picked up until you do){R}")
+
+
+def cmd_test(args):
+    """Dry-run. Delegates to matcher.js via node so the CLI and the extension
+    can never disagree about what would fire."""
+    cfg = load()
+    url = args.url if "//" in args.url else "https://" + args.url
+    host = urlparse(url).hostname or ""
+    node = shutil.which("node")
+    if not node:
+        sys.exit(f"{RED}`capurnion test` needs node on PATH -- it runs matcher.js, the same "
+                 f"code the extension uses, rather than a second copy that could drift from it.{R}")
+    payload = json.dumps({
+        "rules": cfg.get("rules", []),
+        "ctx": {"host": host, "url": url, "pageText": args.text},
+    })
+    proc = subprocess.run([node, os.path.join(ROOT, "bin", "evaluate.js")],
+                          input=payload, capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.exit(f"{RED}matcher failed:{R} {proc.stderr.strip()}")
+    results = json.loads(proc.stdout)
+
+    print(f"{B}host{R} {host}\n")
+    if not results:
+        print(f"  {DIM}no rule lists this host{R}")
+        return
+    for r in results:
+        verdict = f"{GRN}WOULD FIRE{R}" if not r["blocked"] else f"{YEL}no{R}"
+        print(f"  {verdict}  {r['id']}  {DIM}({r['kind']}){R}")
+        print(f"          clicks: /{r['label']}/i")
+        for b in r["blocked"]:
+            print(f"          {DIM}blocked: {b}{R}")
+
+
+def _set_enabled(rule_id, value):
+    cfg = load()
+    for r in cfg.get("rules", []):
+        if r.get("id") == rule_id:
+            r["enabled"] = value
+            errs, warns = validate(cfg)
+            report(errs, warns, quiet_ok=True)
+            save(cfg)
+            state = "enabled" if value else "disabled"
+            print(f"  {GRN}{state}{R} {rule_id}")
+            print(f"  {DIM}run `capurnion sync`, then reload at chrome://extensions{R}")
+            return
+    sys.exit(f"{RED}no rule with id {rule_id!r}{R}")
+
+
+def cmd_enable(args):
+    _set_enabled(args.id, True)
+
+
+def cmd_disable(args):
+    _set_enabled(args.id, False)
+
+
+def cmd_add(args):
+    raw = sys.stdin.read()
+    try:
+        rule = json.loads(raw)
+    except json.JSONDecodeError as e:
+        sys.exit(f"{RED}stdin is not valid JSON: {e}{R}")
+    if not isinstance(rule, dict):
+        sys.exit(f"{RED}expected a single rule object on stdin{R}")
+    cfg = load()
+    if any(r.get("id") == rule.get("id") for r in cfg.get("rules", [])):
+        sys.exit(f"{RED}a rule with id {rule.get('id')!r} already exists{R}")
+    cfg.setdefault("rules", []).append(rule)
+    errs, warns = validate(cfg)
+    report(errs, warns, quiet_ok=True)
+    save(cfg)
+    print(f"  {GRN}added{R} {rule.get('id')}")
+    print(f"  {DIM}run `capurnion sync`, then reload at chrome://extensions{R}")
+
+
+def cmd_init(args):
+    if os.path.exists(RULES) and not args.force:
+        print(f"  {DIM}rules.json already exists -- leaving it alone (--force to overwrite){R}")
+    else:
+        shutil.copyfile(EXAMPLE, RULES)
+        print(f"  {GRN}created{R} rules.json from rules.example.json (every rule disabled)")
+    cmd_sync(args)
+
+
+def cmd_probe(args):
+    """Print the page-probe snippet. Run it in the tab showing the login page."""
+    with open(PROBE) as f:
+        sys.stdout.write(f.read())
+    if sys.stdout.isatty():
+        print(f"\n{DIM}Run this in the tab on the login page (javascript_tool / DevTools),{R}")
+        print(f"{DIM}save the JSON it returns, then: capurnion draft --from probe.json{R}")
+
+
+def cmd_draft(args):
+    """Turn a probe result into a rule. Without --pick, lists what was found."""
+    raw = sys.stdin.read() if args.frm in ("-", None) else open(args.frm).read()
+    try:
+        probe = json.loads(raw)
+    except json.JSONDecodeError as e:
+        sys.exit(f"{RED}probe input is not valid JSON: {e}{R}")
+    if probe.get("capurnionProbe") != 1:
+        sys.exit(f"{RED}that is not a capurnion probe result{R} -- run `capurnion probe` in the page first")
+
+    cands = probe.get("candidates") or []
+    host = probe.get("host") or ""
+
+    if args.pick is None:
+        print(f"{B}host{R}  {host}")
+        print(f"{B}url {R}  {probe.get('url','')}")
+        if probe.get("headings"):
+            print(f"{B}headings{R} (candidate require.pageText guards):")
+            for h in probe["headings"]:
+                print(f"    {h}")
+        print(f"\n{B}clickable candidates{R} (SSO-looking first):")
+        if not cands:
+            print(f"  {YEL}none found -- is the page still loading?{R}")
+        for c in cands:
+            mark = f"{GRN}*{R}" if c.get("ssoLike") else " "
+            vis = "" if c.get("visible") else f" {DIM}(hidden){R}"
+            print(f"  {mark} [{c['pick']:2}] {c['label']}{vis}")
+        print(f"\n  {DIM}then: capurnion draft --from <file> --pick N --id <rule-id> --guard '<regex>'{R}")
+        return
+
+    if not (0 <= args.pick < len(cands)):
+        sys.exit(f"{RED}--pick {args.pick} is out of range (0..{len(cands)-1}){R}")
+    c = cands[args.pick]
+
+    if not args.guard and not args.no_guard:
+        print(f"{RED}refusing to draft a rule with no page guard.{R}", file=sys.stderr)
+        print(f"Without one it clicks any matching button anywhere on {host}.", file=sys.stderr)
+        if probe.get("headings"):
+            print(f"\nHeadings on this page you could guard on:", file=sys.stderr)
+            for h in probe["headings"]:
+                print(f"    --guard {json.dumps(h.lower())}", file=sys.stderr)
+        print(f"\nPass --guard '<regex>', or --no-guard if the host serves nothing else.", file=sys.stderr)
+        sys.exit(1)
+
+    rule = {
+        "id": args.id,
+        "description": args.description or f"{host}: click {c['label']!r}",
+        "enabled": True,
+        "kind": args.kind,
+        "hosts": [host],
+        "click": {"label": args.label_regex or c["labelRegex"]},
+    }
+    if args.guard:
+        rule["require"] = {"pageText": args.guard}
+    if args.kind == "consent-grant":
+        rule["confirmGrantsAccess"] = True
+    if not c.get("visible"):
+        rule["note"] = "Drafted from a candidate that was not visible at probe time -- verify it appears on a real load."
+
+    if args.add:
+        cfg = load()
+        if any(r.get("id") == rule["id"] for r in cfg.get("rules", [])):
+            sys.exit(f"{RED}a rule with id {rule['id']!r} already exists{R}")
+        cfg.setdefault("rules", []).append(rule)
+        errs, warns = validate(cfg)
+        report(errs, warns, quiet_ok=True)
+        save(cfg)
+        print(f"  {GRN}added{R} {rule['id']}")
+        print(f"  {DIM}run `capurnion sync`, then reload at chrome://extensions{R}")
+    else:
+        print(json.dumps(rule, indent=2))
+
+
+def cmd_doctor(args):
+    cfg = load()
+    problems = 0
+    print(f"{B}capurnion doctor{R}\n")
+
+    errs, warns = validate(cfg)
+    for w in warns:
+        print(f"  {YEL}warn{R}  {w}")
+    for e in errs:
+        print(f"  {RED}error{R} {e}")
+    problems += len(errs)
+    if not errs:
+        print(f"  {GRN}ok{R}    rules.json is valid")
+
+    # generated artifacts in step with the source
+    if not os.path.exists(GENERATED):
+        print(f"  {RED}error{R} rules.generated.js missing -- run: capurnion sync")
+        problems += 1
+    else:
+        want = sha256_file(RULES)
+        got = ""
+        with open(GENERATED) as f:
+            for line in f:
+                m = re.match(r"// source-sha256: ([0-9a-f]{64})", line)
+                if m:
+                    got = m.group(1)
+                    break
+        if got != want:
+            print(f"  {RED}error{R} rules.generated.js is STALE (built from a different rules.json) -- run: capurnion sync")
+            problems += 1
+        else:
+            print(f"  {GRN}ok{R}    generated files match rules.json")
+
+    artifacts = ["matcher.js", "engine.js"]
+    if cfg.get("snowflakePat", {}).get("enabled"):
+        artifacts += ["background.js", "snowflake-pat.js", "snowflake-pat-content.js", "snowflake-pat-background.js", "pat-popup.html", "pat-popup.js", "pat-popup.css"]
+    if cfg.get("vault", {}).get("enabled"):
+        artifacts += ["background.js", "vault.js", "vault-device-key.js", "vault-runtime.js", "options.html", "options.js", "options.css"]
+    if cfg.get("oktaLogin", {}).get("enabled"):
+        artifacts += ["background.js", "okta-login-flow.js", "okta-login-content.js", "okta-login-background.js"]
+    for artifact in set(artifacts):
+        if not os.path.exists(os.path.join(ROOT, artifact)):
+            print(f"  {RED}error{R} {artifact} is missing")
+            problems += 1
+    if not shutil.which("node"):
+        print(f"  {YEL}warn{R}  node not on PATH -- `capurnion test` will not run (the extension is unaffected)")
+
+    # chrome registration
+    ext_id = chrome_extension_id(ROOT)
+    print(f"  {DIM}extension id for {ROOT}: {ext_id}{R}")
+    sp = os.path.expanduser("~/Library/Application Support/Google/Chrome/Default/Secure Preferences")
+    try:
+        with open(sp) as f:
+            prefs = json.load(f)
+    except Exception:
+        print(f"  {DIM}skip  could not read Chrome Secure Preferences{R}")
+    else:
+        settings = (prefs.get("extensions") or {}).get("settings") or {}
+        rec = settings.get(ext_id)
+        devmode = ((prefs.get("extensions") or {}).get("ui") or {}).get("developer_mode")
+        if rec is None:
+            print(f"  {YEL}warn{R}  not loaded in Chrome -- chrome://extensions -> Load unpacked -> {ROOT}")
+        elif "manifest" not in rec:
+            print(f"  {RED}error{R} registered but unregistered/gutted (a Chrome prefs reset does this) -- Load unpacked again")
+            problems += 1
+        else:
+            print(f"  {GRN}ok{R}    loaded in Chrome as {rec['manifest'].get('name')}")
+        if devmode is not True:
+            print(f"  {YEL}warn{R}  Developer mode is off -- an unpacked extension will not load")
+
+    print()
+    print(f"  {GRN}no problems{R}" if problems == 0 else f"  {YEL}{problems} problem(s){R}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="capurnion", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("list", help="show every rule and whether it is enabled").set_defaults(fn=cmd_list)
+    sub.add_parser("validate", help="check rules.json against the schema").set_defaults(fn=cmd_validate)
+    sub.add_parser("sync", help="regenerate manifest.json + rules.generated.js").set_defaults(fn=cmd_sync)
+    sub.add_parser("doctor", help="check rules, generated files, and Chrome registration").set_defaults(fn=cmd_doctor)
+    t = sub.add_parser("test", help="dry-run: which rules would fire on a URL")
+    t.add_argument("url"); t.add_argument("--text", help="page text to test require.pageText against")
+    t.set_defaults(fn=cmd_test)
+    e = sub.add_parser("enable", help="enable a rule by id"); e.add_argument("id"); e.set_defaults(fn=cmd_enable)
+    d = sub.add_parser("disable", help="disable a rule by id"); d.add_argument("id"); d.set_defaults(fn=cmd_disable)
+    a = sub.add_parser("add", help="append a rule read as JSON on stdin"); a.set_defaults(fn=cmd_add)
+    i = sub.add_parser("init", help="create rules.json from the example and sync")
+    i.add_argument("--force", action="store_true", help="overwrite an existing rules.json")
+    i.set_defaults(fn=cmd_init)
+    sub.add_parser("probe", help="print the page-probe snippet to run in the login tab").set_defaults(fn=cmd_probe)
+    dr = sub.add_parser("draft", help="turn a probe result into a rule")
+    dr.add_argument("--from", dest="frm", default="-", help="probe JSON file, or - for stdin")
+    dr.add_argument("--pick", type=int, help="candidate index; omit to list them")
+    dr.add_argument("--id", help="rule id to create")
+    dr.add_argument("--kind", default="idp-select", choices=KINDS)
+    dr.add_argument("--guard", help="regex the page text must match")
+    dr.add_argument("--no-guard", action="store_true", help="deliberately create a rule with no page guard")
+    dr.add_argument("--label-regex", help="override the click.label regex")
+    dr.add_argument("--description")
+    dr.add_argument("--add", action="store_true", help="append to rules.json instead of printing")
+    dr.set_defaults(fn=cmd_draft)
+    args = p.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()

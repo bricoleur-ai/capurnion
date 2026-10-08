@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "example-okta",
+      "description": "EXAMPLE: click 'Sign in with Okta' on an app's login page",
+      "enabled": false,
+      "kind": "idp-select",
+      "hosts": ["REPLACE-ME.example.com"],
+      "require": { "pageText": "sign ?in|log ?in" },
+      "click": { "label": "sign in with okta|continue with okta|use okta sso" },
+      "note": "Enable, replace the host, then run: capurnion sync"
+    },
+    {
+      "id": "example-google-workspace",
+      "description": "EXAMPLE: click 'Sign in with Google' / 'Continue with Google'",
+      "enabled": false,
+      "kind": "idp-select",
+      "hosts": ["REPLACE-ME.example.com"],
+      "require": { "pageText": "sign ?in|log ?in" },
+      "click": { "label": "sign in with google|continue with google" }
+    },
+    {
+      "id": "example-microsoft-entra",
+      "description": "EXAMPLE: click 'Sign in with Microsoft' / SAML SSO",
+      "enabled": false,
+      "kind": "idp-select",
+      "hosts": ["REPLACE-ME.example.com"],
+      "require": { "pageText": "sign ?in|log ?in" },
+      "click": { "label": "sign in with microsoft|continue with microsoft|sign in with sso" }
+    },
+    {
+      "id": "example-github-sso",
+      "description": "EXAMPLE: click 'Continue with GitHub' / org SAML SSO prompt",
+      "enabled": false,
+      "kind": "idp-select",
+      "hosts": ["REPLACE-ME.example.com"],
+      "require": { "pageText": "sign ?in|log ?in|single sign-on" },
+      "click": { "label": "continue with github|sign in with github" }
+    },
+    {
+      "id": "example-dedicated-host-loose-guard",
+      "description": "EXAMPLE, pattern: a host that only ever serves YOUR tenant, so a generic heading is safe to accept",
+      "enabled": false,
+      "kind": "idp-select",
+      "hosts": ["mytenant.vendor.example.com"],
+      "require": { "pageText": "sign in to (mytenant|vendor)" },
+      "click": { "label": "sign in with okta sso" },
+      "note": "Pair this with the strict rule below. The host itself guarantees the tenant here, so the vendor's generic heading is acceptable."
+    },
+    {
+      "id": "example-shared-host-strict-guard",
+      "description": "EXAMPLE, pattern: a host shared by every tenant, so the tenant name must appear literally",
+      "enabled": false,
+      "kind": "idp-select",
+      "hosts": ["app.vendor.example.com"],
+      "require": { "pageText": "sign in to mytenant" },
+      "click": { "label": "sign in with okta sso" },
+      "note": "On a multi-tenant login host, require your tenant name in the page text so no other tenant's login is ever auto-clicked."
+    },
+    {
+      "id": "example-session-continue",
+      "description": "EXAMPLE: click through a 'Continue as <user>' interstitial",
+      "enabled": false,
+      "kind": "session-continue",
+      "hosts": ["REPLACE-ME.example.com"],
+      "require": { "pageText": "continue as|stay signed in" },
+      "click": { "label": "^continue as |^yes, continue$|^stay signed in$" },
+      "note": "Grants nothing, but clicks past a screen you might have wanted to read."
+    },
+    {
+      "id": "example-oauth-consent",
+      "description": "EXAMPLE: click 'Allow' on a repetitive OAuth consent screen",
+      "enabled": false,
+      "kind": "consent-grant",
+      "confirmGrantsAccess": true,
+      "hosts": ["REPLACE-ME.example.com"],
+      "require": { "pageText": "wants to access|is requesting permission|authorize .* to" },
+      "click": { "label": "^allow$|^authorize$|^accept$" },
+      "note": "GRANTS AN APPLICATION ACCESS TO YOUR ACCOUNT without you reading the screen. The engine refuses this kind unless confirmGrantsAccess is true. Scope it to one host and one app; never point it at a shared IdP domain like accounts.google.com, where it would blanket-approve every app that asks."
+    }
+  ]
+}

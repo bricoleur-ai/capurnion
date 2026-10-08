@@ -1,0 +1,128 @@
+# Capurnion — instructions for agents
+
+Capurnion auto-clicks SSO "Sign in with &lt;provider&gt;" buttons. You configure it by
+editing **`rules.json` only**, then running two commands. Never edit `engine.js`,
+`matcher.js`, `manifest.json`, or `rules.generated.js` — the last two are generated and
+your changes will be overwritten.
+
+If `rules.json` does not exist yet, run `capurnion init`. It is gitignored on purpose:
+it names the user's hosts, so **never commit it and never paste its contents into a
+public issue, PR, or commit message.**
+
+## Task: automate a login page you can see in a browser
+
+This is the main flow. You have a tab open on the login page.
+
+1. **Probe the page.** `capurnion probe` prints a read-only JS snippet. Run it in that
+   tab (`mcp__claude-in-chrome__javascript_tool`, `page.evaluate`, DevTools). It clicks
+   nothing. Save the JSON it returns.
+
+   The snippet must be evaluated as an expression. It is written so that
+   `return <file contents>` works; do not reformat it or move the leading `(`.
+
+2. **List what it found.** `capurnion draft --from probe.json`
+   Candidates are sorted with SSO-looking labels first and marked `*`. Headings are
+   printed as candidate page guards.
+
+3. **Draft the rule.**
+   ```bash
+   capurnion draft --from probe.json --pick 0 --id acme-okta \
+       --guard "sign in to acme" --add
+   ```
+   Without `--add` it prints the rule for you to inspect first. Without `--guard` it
+   refuses and shows you the page's headings to choose from.
+
+4. **Ship it.** `capurnion sync`
+
+5. **Ask the user to reload** the extension at `chrome://extensions`. **You cannot do
+   this** — `chrome://` pages are not scriptable by any automation. Say so plainly
+   rather than implying the change is already live.
+
+Verify any time without a browser:
+`capurnion test <url> --text "<page text>"` → `WOULD FIRE`, or the exact list of what
+blocked it. `capurnion doctor` says whether the browser is running current rules.
+
+## Task: write a rule by hand
+
+```json
+{
+  "id": "acme-okta",
+  "description": "Acme login page -> Okta SSO",
+  "enabled": true,
+  "kind": "idp-select",
+  "hosts": ["app.acme.com"],
+  "require": { "pageText": "sign ?in to acme" },
+  "click": { "label": "sign in with okta" }
+}
+```
+```bash
+echo '{...}' | capurnion add && capurnion sync
+```
+
+## Rules you must follow
+
+- **`kind` is a safety decision, not a label.** Use `idp-select` unless you have a
+  specific reason. It covers every "Sign in with X" / "Continue with X" / "Use SSO"
+  button — the entire normal case.
+- **Never set `kind: "consent-grant"` on your own initiative.** It clicks
+  Allow/Authorize on an OAuth consent screen, granting an application access to the
+  user's account. It requires `"confirmGrantsAccess": true`, and you should only add one
+  when the user asked for that specific screen, on one specific host. Never on a shared
+  IdP domain (`accounts.google.com`, `login.microsoftonline.com`) — that would approve
+  every application that asks.
+- **Never write a rule targeting an MFA push/approve prompt.** There is no tier for it.
+  Auto-clicking it defeats the second factor. If asked, decline and explain why. (SMS
+  for a single configured tenant is handled *outside* the rule engine by the opt-in
+  `oktaLogin` capability — see below — never by a rule.)
+- **Always set `require.pageText` or `require.url`** unless the host serves nothing but
+  that one login page. `draft` enforces this; hand-written rules should honor it too.
+- **Scope `hosts` as narrowly as the site allows.** Host patterns become the extension's
+  permissions. Prefer `app.acme.com` over `*.acme.com`.
+- **Disabled rules are free** — they ship nothing and grant no permissions, so leaving a
+  half-finished rule at `"enabled": false` is safe.
+
+## Debugging on a live page
+
+The engine logs to the page console. Read it with
+`mcp__claude-in-chrome__read_console_messages` and `pattern: "capurnion"`:
+
+| Line | Means |
+|---|---|
+| `armed on <host>: <ids>` | Content script loaded; these rules are viable. |
+| `rule "<id>" will not fire: <reasons>` | Structurally blocked — bad kind, bad regex, missing flag. |
+| `clicked rule="<id>" ...` | It fired. |
+| `no match within <ms>ms` | Guards never passed, or the button never appeared. |
+| *(nothing at all)* | The content script is not running on this host: no enabled rule names it, or `sync`/reload was skipped. |
+
+## Things that will trip you up
+
+- `sync` builds the manifest from **enabled rules only**. Enabling a rule changes the
+  extension's host permissions, which is why a reload is required.
+- `capurnion test` without `--text` reports `pageText ... untested` rather than passing.
+  Treat that as "unknown", not "yes".
+- Chrome derives the extension's ID from the SHA-256 of its absolute path. Do not move or
+  rename the folder; it becomes a different extension and must be re-installed.
+- `capurnion enable` refuses a rule whose host is still `REPLACE-ME...` and writes
+  nothing. Set the real host first, then enable.
+- `capurnion test` and `draft` need `node` on PATH. The extension itself does not.
+
+## The `oktaLogin` capability (vault + SMS relay)
+
+Separate from the rule engine. For **one** Okta tenant it fills email + password
+from the vault on the sign-in page, then completes the **SMS** factor (select
+Phone → request code → fetch it from a configured HTTP relay → Verify). It drives
+only the SMS/Phone factor; it never approves an Okta Verify push and never fills a
+password-less step-up.
+
+Configure it in `rules.json` (see the README for the full block). Rules you must
+honor:
+
+- It automates the user's **second factor** — only ever set it up on the user's
+  explicit request, for their own account on their own machine. `confirmAutomatesMfa`
+  must be literally `true` or `sync` refuses it.
+- It requires `vault.enabled: true`; `usernameSecret`/`passwordSecret` name vault
+  entries. Never write secret *values* into `rules.json` — only the names.
+- `host` is one bare Okta hostname; `smsCodeUrl` is an endpoint returning
+  `{"code":"..."}`. Its origin becomes a `host_permission`.
+- The code that fills fields lives in `okta-login-*.js`; like `engine.js`/`matcher.js`
+  it is not something you edit to configure a login — you only edit `rules.json`.

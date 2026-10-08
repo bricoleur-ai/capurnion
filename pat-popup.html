@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Snowflake PAT renewal</title>
+  <link rel="stylesheet" href="pat-popup.css">
+</head>
+<body>
+  <h1>Snowflake PAT renewal</h1>
+  <p>Checks hourly. Renews temporary access to 24 hours when fewer than 2 hours remain.</p>
+  <p id="status" role="status">Loading…</p>
+  <p id="times"></p>
+  <p id="error" role="alert"></p>
+  <table hidden id="tokens"><thead><tr><th>Token</th><th>Temporary access</th><th>Expiration</th></tr></thead><tbody></tbody></table>
+  <div class="controls"><button id="check">Check now</button><button id="pause">Pause</button><a id="settings" target="_blank" rel="noopener">Open settings</a></div>
+  <p><button id="options" hidden>Settings &amp; vault</button></p>
+  <script src="rules.generated.js"></script>
+  <script src="pat-popup.js"></script>
+</body>
+</html>

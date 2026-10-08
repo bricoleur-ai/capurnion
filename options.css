@@ -1,0 +1,11 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; color: #202124; background: #f5f6f8; }
+body { margin: 0; } main { max-width: 760px; margin: 44px auto; padding: 0 24px 36px; }
+.brand { color: #2459a6; font-weight: 700; font-size: 14px; } h1 { font-size: 30px; margin: 8px 0; } h2 { font-size: 20px; margin: 0; } h3 { font-size: 16px; }
+p { line-height: 1.6; } header { margin-bottom: 28px; } section { background: #fff; border: 1px solid #dce0e6; border-radius: 12px; padding: 24px; margin: 18px 0; }
+.section-heading, .buttons { display: flex; align-items: center; gap: 10px; } .section-heading { justify-content: space-between; } .buttons { flex-wrap: wrap; margin: 16px 0 0; }
+label { display: block; font-weight: 500; margin: 16px 0 6px; } input { box-sizing: border-box; width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid #aab2bf; background: #fff; color: #202124; font: inherit; }
+button { background: #2459a6; color: #fff; font: inherit; border: 1px solid transparent; padding: 9px 14px; border-radius: 6px; cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
+form > button { margin-top: 18px; } a { color: #2459a6; } #vault-status { font-weight: 600; } #error { color: #a32118; }
+.entry { border-top: 1px solid #e0e3e8; padding: 18px 0; } .entry h3 { margin: 0 0 8px; overflow-wrap: anywhere; } .entry .buttons { margin-top: 8px; }
+.entry button { background: #fff; color: #2459a6; border-color: #aab2bf; } details { border-top: 1px solid #e0e3e8; margin-top: 24px; padding-top: 20px; } summary { cursor: pointer; } [hidden] { display: none !important; }
+@media (prefers-color-scheme: dark) { :root { color: #e5e9f0; background: #151922; } section { background: #202631; border-color: #3c4555; } input { background: #151922; color: #e5e9f0; border-color: #657087; } a, .brand { color: #9fbeff; } .entry button { background: #202631; color: #9fbeff; } #error { color: #ffaaa4; } }
