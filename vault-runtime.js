@@ -1,4 +1,5 @@
-/* Trusted extension code only. No message handler exposes secrets to webpages. */
+/* Trusted extension code only; this file adds no message handler. Webpages cannot message the
+ * extension. The one handler that returns secrets is okta-login-background.js, to its own content script. */
 (() => {
   "use strict";
   const STORAGE_KEY = "capurnionEncryptedVault";

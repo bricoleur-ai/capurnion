@@ -1,9 +1,10 @@
 /* Trusted context. Serves the Okta content script its vaulted username/password
  * and the 2fu SMS code. This is the "explicitly configured automation" the vault
- * docs require for credential filling: it answers only okta-creds / okta-otp, and
- * only from the top frame of the one configured Okta host. The service worker is
- * the only place the password is decrypted; the content script receives it just
- * long enough to type it. */
+ * docs require for credential filling: it answers only okta-creds / okta-otp.
+ * It decrypts the two named secrets with the device key, whether or not the panel
+ * is unlocked (the panel also decrypts while management is unlocked), and hands them
+ * only to capurnion's top-frame content script on the configured Okta host, which
+ * types them into the page's form. */
 "use strict";
 (() => {
   const cfg = globalThis.CAPURNION_RULES?.oktaLogin;
