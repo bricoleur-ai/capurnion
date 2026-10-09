@@ -36,9 +36,9 @@ bin/capurnion init      # creates your private rules.json, every rule off, and s
 
 In Chrome, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose
 the `capurnion` folder. Then run `bin/capurnion doctor`. It worked if Chrome lists **Capurnion —
-SSO/OAuth login auto-click** and `doctor` ends with `no problems` (on macOS it also confirms Chrome has
-it loaded). Every rule starts off, so nothing is clicked yet: [Adding a site](#adding-a-site) turns on
-your first.
+SSO/OAuth login auto-click** and `doctor` ends with `no problems` (on macOS it also checks that Chrome
+has it registered). Every rule starts off, so nothing is clicked yet: [Adding a site](#adding-a-site)
+turns on your first.
 
 ## How it works
 
@@ -52,9 +52,9 @@ renewal add a service worker that loads only what you enable. The
 
 ## What it deliberately does not do
 
-- **No MFA approvals.** No rule can approve a push prompt: to the extension an MFA "Approve" looks like
-  a consent "Allow", and clicking it for you defeats the second factor. Okta sign-in drives only the
-  SMS factor, never an Okta Verify push or a password-less step-up.
+- **No MFA push or approve prompts, ever.** The project does not automate them: to the extension an
+  MFA "Approve" looks like a consent "Allow", and clicking it for you defeats the second factor. Okta
+  sign-in drives only the SMS factor, never an Okta Verify push or a password-less step-up.
 - **No typing from rules.** A rule only clicks. The only fields capurnion fills belong to the two
   opt-in workflows: your Okta sign-in, and the Snowflake bypass duration.
 - **No permissions you did not ask for.** Disabled rules ship nothing, and `init` starts with none.
@@ -157,7 +157,7 @@ Each capability is off until you enable it, and each needs Chrome 120 or newer. 
 
 | Capability | Permissions and scripts |
 |---|---|
-| Snowflake renewal | `alarms`, `storage`, `notifications`; the service worker and popup; a content script on the one settings URL, and the late-SSO watch beside your SSO rules. |
+| Snowflake renewal | `alarms`, `storage`, `notifications`, `scripting`, and `https://app.snowflake.com/*` as a host permission; the service worker and popup; a content script on your account's pages (`…/<org>/<account>/*`), and the late-SSO watch beside your SSO rules. capurnion uses `scripting` only to re-attach that content script to the check's own tab. |
 | Vault | `storage`, and `unlimitedStorage` so the device key survives eviction; the settings page. No website permissions. |
 | Okta sign-in | `storage` and the service worker; a content script on the one Okta host; the relay's origin. With renewal on too, the Okta host, for the session check. |
 
@@ -190,9 +190,12 @@ Chrome restarts, with no stored passphrase. Trusted extension code reads one val
 panel, or five idle minutes, clears its secret fields, decrypted entries and key reference. Keep the
 passphrase safe: it is not stored. A lost device key is restored by unlocking management, without
 losing secrets, and a failed write leaves the previous passphrase and secrets usable. Setting
-`vault.enabled` to `false` removes access and the panel but keeps the encrypted vault for later. The
-profile holds the key for automatic decryption, so this does not protect against someone with that
-profile or control of the extension; it is not a hardware-backed key or an OS keychain.
+`vault.enabled` to `false` removes access and the panel but keeps the encrypted vault for later.
+
+**What it does not protect against.** Locking is not cryptographic revocation: the automation key
+stays in the profile and keeps decrypting. Non-exportable only means Web Crypto will not hand out the
+key's bytes; it is not a hardware-backed key or an OS keychain, and it does not protect you from a
+compromised browser or profile, or from anyone in control of the extension.
 
 ## Okta sign-in (vault and 2fu)
 
@@ -233,34 +236,41 @@ two secrets, unlock vault management once so the device has automation access, t
 
 Once an hour this opens one Snowflake account's Authentication settings page in a **new, inactive
 tab**, lets your SSO rules sign in, and gives each Active programmatic access token with under two
-hours of network-policy bypass left a fresh 24 hours. The tab closes afterwards; if you switch to it,
-automation stops and leaves it open. In the private `rules.json`, beside `rules`:
+hours of network-policy bypass left a fresh 24 hours. Switching to the tab does not stop the check;
+**Pause** in the popup does, as does closing the tab, and the tab closes when the check ends. In the
+private `rules.json`, beside `rules`:
 
 ```json
 "snowflakePat": {
-  "enabled": true,
-  "confirmGrantsAccess": true,
+  "enabled": true, "confirmGrantsAccess": true,
   "url": "https://app.snowflake.com/acme/xy12345/settings/authentication",
-  "expectedUser": "you@example.com",
-  "intervalMinutes": 60,
-  "pollMinutes": 5,
-  "restoreMissingAccess": true,
-  "renewBelowMinutes": 120,
-  "grantHours": 24
+  "expectedUser": "you@example.com", "restoreMissingAccess": true,
+  "intervalMinutes": 60, "pollMinutes": 5, "renewBelowMinutes": 120, "grantHours": 24
 }
 ```
 
 `confirmGrantsAccess` is your deliberate opt-in, `expectedUser` must match the account menu's
 accessible label, and the URL must be one exact HTTPS settings page. The numbers are fixed, and
 `validate` rejects others: a check every 60 minutes, renewal below 120 minutes, grants of 24 hours,
-and a watchdog poll every 5 minutes that retries failed checks. `pollMinutes` and
-`restoreMissingAccess` (renew Active tokens whose timer has vanished) are optional. Run
-`capurnion validate`, `sync`, and reload; the toolbar popup shows results, with **Check now** and
-**Pause**. Chrome must be running, and Snowflake signed in or able to finish its SSO flow. To turn
-renewal off, set `"enabled": false` in the `snowflakePat` block, run `capurnion sync`, and reload the
-extension at `chrome://extensions`. The
-[guide](https://bricoleur.ai/projects/capurnion/tokens-and-the-vault) covers token recovery, the
-watchdog, late SSO buttons, the Okta session check, notifications and what is stored.
+and a watchdog poll every 5 minutes that retries failed checks. Run `capurnion validate` and `sync`,
+then reload the extension at `chrome://extensions` yourself: nothing, `doctor` included, can tell
+which version Chrome is running. To turn renewal off, set `"enabled": false` in the `snowflakePat`
+block, run `capurnion sync`, and reload. Chrome must be running.
+
+A check waits up to 60 seconds for the Active list to show at least one token, and reports a failure,
+never success, if none arrive (so an account with no tokens fails too). A grant counts only once its
+dialog has closed and the same row shows 23 to 24 hours left. A lapsed bypass can leave a token on the
+Active list with no timer at all: `restoreMissingAccess: true` gives every such token a grant through
+its own menu, and without it only a token whose recorded window has passed while the page reports a
+missing network policy gets one. The key is optional, and your call. The popup shows the current step
+and page, **Check now**, **Pause**, **Open check tab**, and how many tokens the last check read and renewed.
+
+**Okta session states.** With Okta sign-in also on, each poll asks your Okta host whether you are
+signed in and records **active**, **signed-out** (Okta's own no-session answer) or **unknown**
+(anything else, such as a bare 404, a redirect or a timeout). Only signed-out sends the check through
+Okta sign-in first. Unknown is never treated as logged out: the check takes your usual SSO flow. The
+[guide](https://bricoleur.ai/projects/capurnion/tokens-and-the-vault) covers recovery, the watchdog,
+late SSO buttons, notifications and what is stored.
 
 ## CLI
 
@@ -273,7 +283,7 @@ watchdog, late SSO buttons, the Okta session check, notifications and what is st
 | `capurnion test <url> [--text ...]` | Dry run; says exactly why a rule would not fire. |
 | `capurnion validate` | Schema check; non-zero exit on error. |
 | `capurnion sync` | Regenerate the manifest and shipped rules. |
-| `capurnion doctor` | Rules valid? Generated files current? On macOS, loaded in Chrome? |
+| `capurnion doctor` | Rules valid? Generated files current? On macOS, registered in Chrome? |
 | `capurnion enable/disable <id>` | Flip a rule. |
 | `capurnion add < rule.json` | Append a rule from stdin, validated. |
 
@@ -300,15 +310,15 @@ watchdog, late SSO buttons, the Okta session check, notifications and what is st
   <host>: <rule ids>`, why a rule cannot fire, and `[capurnion] clicked rule=...`. Silence means no
   enabled rule names that host, or you did not `sync` and reload.
 - **`doctor` says STALE.** You edited `rules.json` without running `sync`.
-- **`doctor` says gutted, or not loaded** (macOS). A Chrome protected-preferences reset unregisters
-  every unpacked extension at once, silently. Turn Developer mode back on and Load unpacked again.
+- **`doctor` says not loaded, or incomplete registration** (macOS). A Chrome protected-preferences
+  reset unregisters every unpacked extension at once, silently. Turn Developer mode on, Load unpacked.
 - **The label changed, or the button is in an iframe.** Update `click.label`, or set
   `"allFrames": true`; then `sync` and reload.
 - **I need to sign in another way this once.** Switch the extension off at `chrome://extensions`.
 - **A renewal failed.** The popup shows why; the watchdog retries at the next poll, and **Check now**
   retries at once. Okta sign-in logs `[capurnion-okta]` lines in the Okta page's console.
-- **Okta says could not verify.** Your deployment lacks the session endpoint. Renewal still runs
-  through your usual SSO flow; only the early detour to Okta is lost.
+- **Okta says could not verify.** The session check got no clear answer (a missing endpoint, a
+  redirect, a timeout). That never counts as signed out: renewal still runs through your SSO flow.
 - **I moved the folder.** Chrome derives an unpacked extension's ID from the SHA-256 of its absolute
   path, so it is now a different extension: load it again. `doctor` prints the ID it expects.
 
@@ -324,7 +334,9 @@ The browser workflow tests skip, each with an install hint, until you run
 `npx playwright install chromium`. Optional overrides point the tests at installs you already have:
 `JSDOM_MODULE` (a jsdom module; it also runs the workflow tests on jsdom's simulated layout instead of
 a browser), `PLAYWRIGHT_MODULE` (a Playwright module) and `CHROMIUM_EXECUTABLE` (a Chromium binary).
-The vault tests simulate IndexedDB; they do not replace a check in live Chrome.
+**What the tests do not prove.** Apart from the workflow tests' Chromium page, they run on jsdom and a
+VM with simulated Chrome APIs and IndexedDB. None is an end-to-end run in real Chrome against Snowflake
+or Okta, and unattended hourly renewal over long periods is not yet proven.
 
 ## The full guide
 
