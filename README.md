@@ -256,7 +256,9 @@ accessible label, and the URL must be one exact HTTPS settings page. The numbers
 and a watchdog poll every 5 minutes that retries failed checks. `pollMinutes` and
 `restoreMissingAccess` (renew Active tokens whose timer has vanished) are optional. Run
 `capurnion validate`, `sync`, and reload; the toolbar popup shows results, with **Check now** and
-**Pause**. Chrome must be running, and Snowflake signed in or able to finish its SSO flow. The
+**Pause**. Chrome must be running, and Snowflake signed in or able to finish its SSO flow. To turn
+renewal off, set `"enabled": false` in the `snowflakePat` block, run `capurnion sync`, and reload the
+extension at `chrome://extensions`. The
 [guide](https://bricoleur.ai/projects/capurnion/tokens-and-the-vault) covers token recovery, the
 watchdog, late SSO buttons, the Okta session check, notifications and what is stored.
 
