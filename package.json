@@ -1,9 +1,9 @@
 {
   "name": "capurnion",
   "private": true,
-  "description": "A Chrome extension that clicks one guarded sign-in button for you, configured by a single JSON file.",
+  "description": "A Chrome extension that finishes the sign-ins you repeat every day: one guarded click by default, and with a local encrypted vault, Okta and token renewals too.",
   "license": "MIT",
-  "engines": { "node": ">=22" },
+  "engines": { "node": "^22.22.2 || ^24.15.0 || >=26.0.0" },
   "scripts": {
     "test": "node --test tests/*.test.js && python3 -B tests/snowflake-pat-cli.test.py"
   },

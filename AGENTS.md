@@ -26,7 +26,7 @@ This is the main flow. You have a tab open on the login page.
 
 3. **Draft the rule.**
    ```bash
-   capurnion draft --from probe.json --pick 0 --id acme-okta \
+   capurnion draft --from probe.json --pick 0 --id acme-app \
        --guard "sign in to acme" --add
    ```
    Without `--add` it prints the rule for you to inspect first. Without `--guard` it
@@ -40,17 +40,18 @@ This is the main flow. You have a tab open on the login page.
 
 Verify any time without a browser:
 `capurnion test <url> --text "<page text>"` → `WOULD FIRE`, or the exact list of what
-blocked it. `capurnion doctor` says whether the browser is running current rules.
+blocked it. `capurnion doctor` says whether the generated files match `rules.json` (and, on
+macOS, whether Chrome has the extension loaded). It cannot tell whether the user reloaded.
 
 ## Task: write a rule by hand
 
 ```json
 {
-  "id": "acme-okta",
+  "id": "acme-app",
   "description": "Acme login page -> Okta SSO",
   "enabled": true,
   "kind": "idp-select",
-  "hosts": ["app.acme.com"],
+  "hosts": ["app.example.com"],
   "require": { "pageText": "sign ?in to acme" },
   "click": { "label": "sign in with okta" }
 }
@@ -77,7 +78,7 @@ echo '{...}' | capurnion add && capurnion sync
 - **Always set `require.pageText` or `require.url`** unless the host serves nothing but
   that one login page. `draft` enforces this; hand-written rules should honor it too.
 - **Scope `hosts` as narrowly as the site allows.** Host patterns become the extension's
-  permissions. Prefer `app.acme.com` over `*.acme.com`.
+  permissions. Prefer `app.example.com` over `*.example.com`.
 - **Disabled rules are free** — they ship nothing and grant no permissions, so leaving a
   half-finished rule at `"enabled": false` is safe.
 
@@ -104,7 +105,7 @@ The engine logs to the page console. Read it with
   rename the folder; it becomes a different extension and must be re-installed.
 - `capurnion enable` refuses a rule whose host is still `REPLACE-ME...` and writes
   nothing. Set the real host first, then enable.
-- `capurnion test` and `draft` need `node` on PATH. The extension itself does not.
+- `capurnion test` needs `node` on PATH. The extension itself does not.
 
 ## The `oktaLogin` capability (vault + SMS relay)
 
@@ -126,3 +127,35 @@ honor:
   `{"code":"..."}`. Its origin becomes a `host_permission`.
 - The code that fills fields lives in `okta-login-*.js`; like `engine.js`/`matcher.js`
   it is not something you edit to configure a login — you only edit `rules.json`.
+
+## The `snowflakePat` capability (renewal, recovery, session watch)
+
+Also separate from the rule engine. Each hour, and at a five-minute watchdog poll when a check
+failed or a window is nearly due, it opens its own inactive tab on **one** Snowflake account's
+Authentication settings page. There it grants 24 hours of network-policy bypass to each Active
+token with under two hours left. Rules you must honor:
+
+- It grants an access exception, so set it up only on the user's explicit request.
+  `confirmGrantsAccess` must be literally `true`. The numbers (`intervalMinutes` 60,
+  `pollMinutes` 5, `renewBelowMinutes` 120, `grantHours` 24) are fixed and `validate` rejects
+  any other value; do not try to tune them.
+- **`restoreMissingAccess: true` is the user's call, not yours.** It gives every Active token
+  with no timer a fresh grant, even with no history. Without it, a vanished timer is restored
+  only when stored history shows its window has passed and the page reports a missing network
+  policy. Leave the key out unless they asked for it.
+- **Late SSO recovery** (`snowflake-sso-watch.js`) rides along with the SSO rules once the
+  capability is on. It clicks only in the check's own background tab, on Snowflake's hosts, for
+  an enabled `idp-select` rule whose guards pass, and only a button whose label mentions Okta or
+  SSO. It needs no rule of its own: never widen a rule's `hosts` or `click.label` to make it fire.
+- **The Okta session check.** With `oktaLogin` also enabled, each poll sends a
+  cookie-authenticated GET to that host's `/api/v1/sessions/me`, and `sync` adds the host to
+  `host_permissions`. A confirmed signed-out session sends the check's tab through Okta sign-in
+  first. "Could not verify" means the endpoint is unavailable there; nothing in `rules.json`
+  fixes it, and renewal still runs through the usual SSO flow.
+- Never ask for, store or paste a PAT secret, an Okta session ID or a cookie. The extension never
+  reads or saves them, and nothing in `rules.json` needs them.
+- You cannot drive the check: it runs in an inactive tab and stops if anyone switches to it. To
+  stop it, ask the user to press **Pause** in the toolbar popup (it stops the hourly check, the
+  watchdog and sign-in recovery), or set `"enabled": false`, `sync`, and ask them to reload.
+- The code lives in `snowflake-pat*.js`, `snowflake-sso-watch.js` and `okta-session.js`. Like
+  `engine.js`, it is not something you edit to configure anything.
