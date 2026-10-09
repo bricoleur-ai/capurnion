@@ -172,6 +172,7 @@ async function refreshPat() {
   byId("pat-status").textContent = patPaused ? "Paused" : status.status === "checking" ? (status.phase === "okta" ? "Restoring Okta sign-in…" : "Checking Snowflake…") :
     status.error || (status.checkedAt ? `Last check: ${new Date(status.checkedAt).toLocaleString()}` : "Waiting for the first check");
   if (result.okta && !patPaused) byId("pat-status").textContent += ` · Okta: ${{active: "signed in", "signed-out": "signed out", unknown: "could not verify"}[result.okta.state] || result.okta.state}`;
+  if (status.status === "checking" && status.step) byId("pat-status").textContent += ` · ${status.step}`;
   byId("pat-check").disabled = patPaused || status.status === "checking";
   byId("pat-pause").textContent = patPaused ? "Resume" : "Pause";
 }

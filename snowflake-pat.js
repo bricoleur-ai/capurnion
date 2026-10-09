@@ -11,6 +11,20 @@
     (cfg.restoreMissingAccess === undefined || typeof cfg.restoreMissingAccess === "boolean") &&
     cfg.renewBelowMinutes === 120 && cfg.grantHours === 24 &&
     typeof cfg.expectedUser === "string" && !!cfg.expectedUser.trim();
+  function isAccountPage(value, cfg) {
+    try {
+      const actual = new URL(value), target = new URL(cfg.url);
+      const prefix = target.pathname.slice(0, target.pathname.indexOf("/settings/")) + "/";
+      return actual.origin === target.origin && actual.pathname.startsWith(prefix);
+    } catch { return false; }
+  }
+  function isDestination(value, cfg) {
+    try {
+      const actual = new URL(value), target = new URL(cfg.url);
+      return actual.origin === target.origin && actual.pathname === target.pathname &&
+        (!actual.hash || !actual.hash.startsWith("#/"));
+    } catch { return false; }
+  }
 
   function remainingMinutes(value) {
     const label = normalize(value).toLowerCase();
@@ -29,13 +43,36 @@
     return !!el.getClientRects().length && style.display !== "none" && style.visibility !== "hidden";
   }
   const enabled = el => visible(el) && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+  // A DOM click on the owned row's menu does not require a painted rectangle.
+  // Background tabs may defer layout; explicit hiding and disabled state still block it.
+  function menuEnabled(el) {
+    if (!el?.isConnected || el.closest('[hidden], [aria-hidden="true"], [inert]') ||
+        el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+    const style = el.ownerDocument.defaultView.getComputedStyle(el);
+    return style.display !== "none" && style.visibility !== "hidden";
+  }
   function one(root, selector, predicate = visible) {
     const matches = [...root.querySelectorAll(selector)].filter(predicate);
     if (matches.length > 1) throw new Error(`Ambiguous control: ${selector}`);
     return matches[0] || null;
   }
+  function tokenMenuControls(row) {
+    return [...row.querySelectorAll('button, [role="button"]')].filter(el => {
+      const label = normalize(el.getAttribute("aria-label")) || normalize(
+        (el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
+          .map(id => el.ownerDocument.getElementById(id)?.textContent || "").join(" "));
+      return label.toLowerCase() === "more options" ||
+        (el.hasAttribute("data-menu-trigger") && el.getAttribute("data-menu-trigger") !== "false" &&
+        ["true", "menu"].includes(el.getAttribute("aria-haspopup")));
+    });
+  }
+  function menuDiagnostic(row) {
+    if (!row) return "token row is no longer present";
+    const controls = tokenMenuControls(row);
+    return `${controls.length} matching menu controls, ${controls.filter(visible).length} visible, ${controls.filter(menuEnabled).length} enabled`;
+  }
   function scope(doc, cfg) {
-    if (!validConfig(cfg) || doc.defaultView.location.href !== cfg.url)
+    if (!validConfig(cfg) || !isDestination(doc.defaultView.location.href, cfg))
       throw new Error("Account URL or grant authorization does not match configuration");
     const users = [...doc.querySelectorAll('[data-testid="user-context-menu-button"]')];
     if (users.length !== 1 || normalize(users[0].getAttribute("aria-label")) !== `Account Menu: ${cfg.expectedUser}`)
@@ -45,6 +82,7 @@
     const root = one(doc, SECTION, el => el.isConnected);
     if (!root) return null;
     const active = one(root, '[role="radio"][aria-checked="true"]', el => el.isConnected);
+    if (!active) return null;
     if (text(active) !== "Active") throw new Error("PAT list is not showing Active tokens");
     const result = [...root.querySelectorAll('[role="row"]')].map(row => {
       const nameNode = one(row, '[data-testid="name"]', el => el.isConnected);
@@ -80,10 +118,10 @@
       return items;
     };
     const guard = async () => {
-      if (!(await allow())) throw new Error("Check cancelled, paused, or background tab was activated");
+      if (!(await allow())) throw new Error("Check cancelled, paused, or the owned tab is no longer authorized");
       scope(doc, cfg);
     };
-    const wait = predicate => new Promise((resolve, reject) => {
+    const wait = (predicate, limitMs = timeoutMs, timeoutMessage = "Timed out waiting for the expected Snowflake control or confirmation") => new Promise((resolve, reject) => {
       const start = Date.now();
       let timer;
       const observer = new doc.defaultView.MutationObserver(check);
@@ -95,33 +133,39 @@
       function check() {
         clearTimeout(timer);
         try {
-          if (doc.defaultView.location.href !== cfg.url) throw new Error("Authentication page changed during renewal");
+          if (!isDestination(doc.defaultView.location.href, cfg)) throw new Error("Authentication page changed during renewal");
           const value = predicate();
           if (value) return finish(null, value);
-          if (Date.now() - start >= timeoutMs) return finish(new Error("Timed out waiting for the expected Snowflake control or confirmation"));
+          if (Date.now() - start >= limitMs) return finish(new Error(typeof timeoutMessage === "function" ? timeoutMessage() : timeoutMessage));
           timer = setTimeout(check, 200);
         } catch (error) { finish(error); }
       }
       observer.observe(doc.documentElement, {subtree: true, childList: true, attributes: true, characterData: true});
       check();
     });
-    const click = async el => {
+    const click = async (el, clickable = enabled) => {
       await guard();
-      if (!enabled(el)) throw new Error("Expected control is not clickable");
+      if (!clickable(el)) throw new Error("Expected control is not clickable");
       el.click();
     };
     const current = name => (readRows() || []).find(item => item.name === name);
     const visibleDialog = () => one(doc, DIALOG);
+    const step = async label => hooks.step?.(label);
     try {
+      await step("Waiting for the Active token list");
       await wait(() => {
         const items = readRows();
         const user = doc.querySelector('[data-testid="user-context-menu-button"]');
-        return items && user ? items : null;
-      });
+        // Snowsight mounts this section before its asynchronous token request finishes.
+        // An empty array means no rows have been observed, not a completed check.
+        return items?.length && user ? items : null;
+      }, hooks.timeoutMs || 60000, "Snowflake token rows did not load; no tokens were checked. Retry after confirming the Active list is populated.");
       await guard();
       if (one(doc, '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]'))
         throw new Error("Another dialog or menu is already open");
       const initial = readRows();
+      if (!initial?.length) throw new Error("Snowflake token rows disappeared before checking temporary access");
+      await step("Reading temporary-access windows");
       report.tokens = initial.map(metadata);
       for (const item of initial) {
         if (item.temporaryAccess && item.minutes === null) report.warnings.push(`${item.name}: unrecognized temporary-access timer; skipped`);
@@ -132,12 +176,27 @@
         const item = current(candidate.name);
         if (!item || item.expires !== candidate.expires) throw new Error("Token row changed before renewal");
         if (item.minutes === null || item.minutes >= cfg.renewBelowMinutes) continue;
-        const menuButton = one(item.row, 'button[aria-label="More options"]');
-        if (!menuButton) throw new Error(`${item.name}: More options button is missing`);
-        await click(menuButton);
+        await step(`Opening ${item.name}'s token menu`);
+        const scrolled = new WeakSet();
+        const menuButton = await wait(() => {
+          // Re-read after scrolling: virtualized or asynchronously rendered rows
+          // can replace their controls while the background tab is loading.
+          const latest = current(candidate.name);
+          if (!latest) return null;
+          if (latest.expires !== candidate.expires) throw new Error("Token row changed before opening its menu");
+          if (!scrolled.has(latest.row)) {
+            scrolled.add(latest.row);
+            latest.row.scrollIntoView?.({block: "center", inline: "nearest"});
+          }
+          const controls = tokenMenuControls(latest.row).filter(menuEnabled);
+          if (controls.length > 1) throw new Error(`${candidate.name}: Ambiguous token menu controls`);
+          return controls[0] || null;
+        }, timeoutMs, () => `${candidate.name}: Token menu did not become clickable (${menuDiagnostic(current(candidate.name)?.row)})`);
+        await click(menuButton, menuEnabled);
         const menuItem = await wait(() => one(doc, '[role="menuitem"]', el => enabled(el) &&
           text(el).toLowerCase() === "bypass requirement for network policy" && !!el.closest('[role="menu"]')));
         await click(menuItem);
+        await step(`Filling ${item.name}'s 24-hour bypass form`);
         const dialog = await wait(visibleDialog);
         if (text(dialog.querySelector('[slot="title"], h2')).toLowerCase() !== "bypass network policy requirement")
           throw new Error("Unexpected bypass dialog title");
@@ -170,6 +229,7 @@
         // No asynchronous gap between the final form/identity checks and submit.
         if (!enabled(grant)) throw new Error("Grant access is no longer clickable");
         grant.click();
+        await step(`Confirming ${candidate.name}'s new bypass window`);
         const renewed = await wait(() => {
           if (visibleDialog()) return null;
           const updated = current(candidate.name);
@@ -190,7 +250,7 @@
     return report;
   }
 
-  const api = {validConfig, remainingMinutes, run};
+  const api = {validConfig, isAccountPage, isDestination, remainingMinutes, run};
   globalThis.CAPURNION_PAT = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();

@@ -85,6 +85,13 @@ test("timer parsing and strict two-hour boundary", () => {
   assert.equal(api.remainingMinutes("Expires on Jan 5, 2027"), null);
   assert.equal(api.remainingMinutes("Temporary access has expired"), 0);
 });
+test("destination matching allows return parameters but rejects other accounts and hash routes", () => {
+  assert(api.isDestination(URL + "?return=okta#tokens", cfg));
+  assert(!api.isDestination(URL.replace("testaccount", "otheraccount"), cfg));
+  assert(!api.isDestination(URL + "#/homepage", cfg));
+  assert(api.isAccountPage("https://app.snowflake.com/testorg/testaccount/#/homepage", cfg));
+  assert(!api.isAccountPage("https://app.snowflake.com/testorg/testaccount-other/settings/authentication", cfg));
+});
 browserTest("recovers a lapsed Active token with no badge through its own kebab menu", async () => {
   const result = await run({rows: [{name: "lapsed", timer: ""}], minutes: true}, {...cfg, restoreMissingAccess: true});
   assert.equal(result.report.status, "ok", result.report.error);
@@ -98,6 +105,31 @@ browserTest("recovers vanished timer from an elapsed, matching window history", 
   const result = await run({rows: [{name: "lapsed", timer: ""}], previousTokens: [{name: "lapsed", expires: "Expires on Jan 5, 2027", bypassExpiresAt: Date.now() - 1000}]});
   assert.equal(result.report.status, "ok"); assert.deepEqual(result.report.renewed, ["lapsed"]);
 });
+for (const [name, options] of [
+  ["menu rendered after the token row", {menuDelayMs: 120}],
+  ["row scrolled into view", {hiddenUntilScroll: true}],
+  ["accessible label reference", {menuKind: "labelledby"}],
+  ["semantic menu trigger", {menuKind: "popup-trigger"}],
+  ["button role", {menuKind: "role-button"}],
+  ["background menu layout deferred", {menuWithoutLayout: true}],
+]) {
+  browserTest(`opens the token's kebab menu with ${name}`, async () => {
+    const result = await run({...options, rows: [{name: "lapsed", timer: ""}]}, {...cfg, restoreMissingAccess: true});
+    assert.equal(result.report.status, "ok", result.report.error);
+    assert.deepEqual(result.menuClicks, ["lapsed"]);
+    assert.deepEqual(result.grants, [{name: "lapsed", amount: "24", unit: "Hours"}]);
+    assert.deepEqual(result.report.renewed, ["lapsed"]);
+  });
+}
+for (const [name, options] of [["missing", {missingMenu: true}], ["duplicate", {duplicateMenu: true}],
+  ["disabled", {disabledMenu: true}], ["explicitly hidden", {permanentlyHiddenMenu: true}]]) {
+  browserTest(`does not click a ${name} token menu`, async () => {
+    const result = await run({...options, rows: [{name: "lapsed", timer: ""}]}, {...cfg, restoreMissingAccess: true});
+    assert.equal(result.report.status, "error");
+    assert.deepEqual(result.menuClicks, []);
+    assert.deepEqual(result.grants, []);
+  });
+}
 browserTest("no-badge recovery still rejects unknown badges, changed menu, and wrong user", async () => {
   const config = {...cfg, restoreMissingAccess: true};
   const unknown = await run({rows: [{name: "unknown", timer: "Temporary access unavailable"}]}, config);
@@ -107,8 +139,19 @@ browserTest("no-badge recovery still rejects unknown badges, changed menu, and w
     assert.equal(result.report.status, "error"); assert.deepEqual(result.grants, []);
   }
 });
-browserTest("empty Active list completes without a timeout", async () => {
-  const result = await run({rows: []}); assert.equal(result.report.status, "ok"); assert.deepEqual(result.grants, []);
+browserTest("an empty loading list never reports a successful check", async () => {
+  const result = await run({rows: []});
+  assert.equal(result.report.status, "error");
+  assert.match(result.report.error, /token rows.*load/i);
+  assert.deepEqual(result.grants, []);
+});
+browserTest("waits for asynchronously loaded no-badge tokens before renewing", async () => {
+  const result = await run({rows: [{name: "lapsed", timer: ""}], delayRowsMs: 120, minutes: true}, {...cfg, restoreMissingAccess: true});
+  assert.equal(result.report.status, "ok", result.report.error);
+  assert.equal(result.report.tokens.length, 1);
+  assert.deepEqual(result.menuClicks, ["lapsed"]);
+  assert.deepEqual(result.grants, [{name: "lapsed", amount: "24", unit: "Hours"}]);
+  assert.deepEqual(result.report.renewed, ["lapsed"]);
 });
 browserTest("renews each due row once, skips two-hour boundary and healthy/no-bypass rows", async () => {
   const result = await run();

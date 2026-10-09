@@ -26,7 +26,21 @@ module.exports = function fixture(options = {}) {
           const name = document.createElement('span'); name.dataset.testid='name'; name.textContent=token.name; row.append(name);
           if (token.timer) { const badge=document.createElement('button');badge.dataset.testid='bypass-timer';badge.textContent=token.timer;row.append(badge); }
           const expiry=document.createElement('p');expiry.dataset.testid='expires-at';expiry.textContent='Expires on Jan 5, 2027';row.append(expiry);
-          const more=document.createElement('button');more.setAttribute('aria-label','More options');more.textContent='⋮';row.append(more);
+          const more=document.createElement(options.menuKind==='role-button'?'div':'button');
+          if(options.menuKind==='role-button')more.setAttribute('role','button');
+          if(options.menuKind==='labelledby'){
+            const label=document.createElement('span');label.id='menu-label-'+tokens.indexOf(token);label.textContent='More options';row.append(label);
+            more.setAttribute('aria-labelledby',label.id);
+          }else if(options.menuKind!=='popup-trigger')more.setAttribute('aria-label','More options');
+          if(options.menuKind!=='labelledby'){more.setAttribute('aria-haspopup','true');more.setAttribute('data-menu-trigger','true');}
+          more.textContent='⋮';row.append(more);
+          if(options.menuDelayMs){more.hidden=true;setTimeout(()=>{more.hidden=false;},options.menuDelayMs);}
+          if(options.menuWithoutLayout)more.getClientRects=()=>[];
+          if(options.disabledMenu)more.setAttribute('aria-disabled','true');
+          if(options.permanentlyHiddenMenu)more.style.display='none';
+          if(options.hiddenUntilScroll){more.hidden=true;row.scrollIntoView=()=>{more.hidden=false;};}
+          if(options.missingMenu)more.remove();
+          if(options.duplicateMenu){const duplicate=more.cloneNode(true);row.append(duplicate);duplicate.onclick=()=>window.menuClicks.push('wrong-menu');}
           more.onclick=()=>{window.menuClicks.push(token.name);openMenu(token);};root.append(row);
         }
       }
@@ -58,7 +72,7 @@ module.exports = function fixture(options = {}) {
           if(!options.noConfirmation){token.timer='23 hours left on temporary access';render();}
         };
       }
-      render();
+      if(options.delayRowsMs)setTimeout(render,options.delayRowsMs);else render();
       if(options.loginFirst){
         const section=document.querySelector('[data-testid="programmatic-access-tokens"]');
         const user=document.querySelector('[data-testid="user-context-menu-button"]');section.remove();user.remove();

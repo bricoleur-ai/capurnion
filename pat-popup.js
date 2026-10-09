@@ -11,12 +11,20 @@ async function refresh() {
   const status = data.status || {};
   isPaused = data.paused;
   const labels = {checking: status.phase === "okta" ? "Restoring Okta sign-in…" : "Checking Snowflake…", ok: "Last check succeeded", error: "Last check failed", warning: "Last check has skipped tokens"};
+  if (status.status === "ok") labels.ok = status.tokens?.length
+    ? `Last check: read ${status.tokens.length} token${status.tokens.length === 1 ? "" : "s"}; renewed ${status.renewed?.length || 0}`
+    : "Last check read no tokens; retry the check";
   byId("status").textContent = isPaused ? "Paused" : labels[status.status] || "Waiting for the first check";
+  byId("step").textContent = status.step || "";
+  byId("page").textContent = status.pageUrl || "";
+  byId("open-check").hidden = !data.job;
   byId("times").textContent = `Last completed check: ${date(status.checkedAt)}\nNext hourly check: ${isPaused ? "Paused" : date(data.nextCheck)}\nNext sign-in/retry poll: ${isPaused ? "Paused" : date(data.nextPoll)}`;
   const sessionLabels = {active: "Signed in", "signed-out": "Signed out", unknown: "Could not verify"};
   byId("okta").textContent = data.okta ? `Okta: ${sessionLabels[data.okta.state] || data.okta.state} (${date(data.okta.checkedAt)})${data.okta.error ? `. ${data.okta.error}` : ""}` : "";
   byId("times").style.whiteSpace = "pre-line";
   byId("error").textContent = [status.error, ...(status.warnings || [])].filter(Boolean).join("\n");
+  if (status.status === "checking" && status.lastFailure?.error)
+    byId("error").textContent = `Previous attempt: ${status.lastFailure.error} (${date(status.lastFailure.at)})`;
   byId("pause").textContent = isPaused ? "Resume" : "Pause";
   byId("check").disabled = isPaused || status.status === "checking";
   byId("settings").href = data.config.url;
@@ -41,6 +49,7 @@ async function act(type, data) {
   } catch (error) { byId("error").textContent = error.message; }
 }
 byId("check").addEventListener("click", () => act("pat-check-now"));
+byId("open-check").addEventListener("click", () => act("pat-open-tab"));
 byId("pause").addEventListener("click", () => act("pat-pause", {paused: !isPaused}));
 chrome.storage.onChanged.addListener(() => refresh().catch(error => { byId("error").textContent = error.message; }));
 refresh().catch(error => { byId("error").textContent = error.message; });

@@ -44,9 +44,10 @@ class PatConfigTests(unittest.TestCase):
                     fn(None)
                     manifest = json.loads(pathlib.Path(namespace["MANIFEST"]).read_text())
                     if enabled:
-                        self.assertEqual(manifest["permissions"], ["alarms", "storage", "notifications"])
-                        self.assertEqual(manifest["content_scripts"][0]["matches"], [CONFIG["snowflakePat"]["url"]])
+                        self.assertEqual(manifest["permissions"], ["alarms", "storage", "notifications", "scripting"])
+                        self.assertEqual(manifest["content_scripts"][0]["matches"], ["https://app.snowflake.com/testorg/testaccount/*"])
                         self.assertEqual(manifest["background"]["service_worker"], "background.js")
+                        self.assertEqual(manifest["host_permissions"], ["https://app.snowflake.com/*"])
                     else:
                         self.assertNotIn("permissions", manifest)
                         self.assertNotIn("background", manifest)
@@ -75,7 +76,7 @@ class PatConfigTests(unittest.TestCase):
                 pathlib.Path(namespace["RULES"]).write_text(json.dumps(config))
                 fn(None)
                 manifest = json.loads(pathlib.Path(namespace["MANIFEST"]).read_text())
-                self.assertEqual(manifest["host_permissions"], ["https://example.okta.com/*", "https://sms.example.com/*"])
+                self.assertEqual(manifest["host_permissions"], ["https://app.snowflake.com/*", "https://example.okta.com/*", "https://sms.example.com/*"])
                 self.assertIn("snowflake-sso-watch.js", manifest["content_scripts"][0]["js"])
                 self.assertIn("notifications", manifest["permissions"])
                 self.assertIn('"restoreMissingAccess": true', pathlib.Path(namespace["GENERATED"]).read_text())

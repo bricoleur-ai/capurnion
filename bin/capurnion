@@ -273,13 +273,18 @@ def cmd_sync(args):
     pat = cfg.get("snowflakePat", {})
     if pat.get("enabled"):
         scripts.append({
-            "matches": [pat["url"]],
+            # Snowsight can reach settings by SPA navigation after sign-in.
+            # Install on this account; actions still require its exact settings route.
+            "matches": [pat["url"].split("/settings/")[0] + "/*"],
             "js": ["rules.generated.js", "snowflake-pat.js", "snowflake-pat-content.js"],
             "run_at": "document_idle",
             "all_frames": False,
         })
         manifest["minimum_chrome_version"] = "120"
-        manifest["permissions"] = ["alarms", "storage", "notifications"]
+        manifest["permissions"] = ["alarms", "storage", "notifications", "scripting"]
+        # Static content-script matches alone do not grant the worker the tab
+        # metadata and programmatic injection access it needs for recovery.
+        manifest.setdefault("host_permissions", []).append(f"https://{urlparse(pat['url']).hostname}/*")
         manifest["background"] = {"service_worker": "background.js"}
         manifest["action"] = {"default_title": "Capurnion — Snowflake PAT renewal", "default_popup": "pat-popup.html"}
     vault = cfg.get("vault", {})
@@ -583,8 +588,13 @@ def cmd_doctor(args):
         if rec is None:
             print(f"  {YEL}warn{R}  not loaded in Chrome -- chrome://extensions -> Load unpacked -> {ROOT}")
         elif "manifest" not in rec:
-            print(f"  {RED}error{R} registered but unregistered/gutted (a Chrome prefs reset does this) -- Load unpacked again")
-            problems += 1
+            if rec.get("path") == ROOT:
+                print(f"  {GRN}ok{R}    registered in Chrome at this extension's path")
+                print(f"  {DIM}note  Chrome did not store a manifest here; running state/version cannot be verified from preferences{R}")
+                if rec.get("disable_reasons"):
+                    print(f"  {YEL}warn{R}  Chrome records disable reasons -- inspect chrome://extensions")
+            else:
+                print(f"  {YEL}warn{R}  incomplete Chrome registration -- inspect chrome://extensions")
         else:
             print(f"  {GRN}ok{R}    loaded in Chrome as {rec['manifest'].get('name')}")
         if devmode is not True:

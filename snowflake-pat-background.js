@@ -11,13 +11,90 @@ const JOB_LIMIT_MS = 300000, POLL_MINUTES = 5;
 let queue = Promise.resolve();
 function serial(task) {
   const result = queue.then(task);
-  queue = result.catch(error => console.error(`[capurnion-pat] ${error.message}`));
+  queue = result.catch(async error => {
+    console.error(`[capurnion-pat] ${error.message}`);
+    try {
+      const current = await job();
+      if (current) await finish(current, {status: "error", error: error.message});
+      else {
+        const prior = (await chrome.storage.local.get(STATUS_KEY))[STATUS_KEY] || {};
+        await chrome.storage.local.set({[STATUS_KEY]: {...prior, status: "error", phase: "complete",
+          step: error.message, error: error.message, checkedAt: Date.now(), lastFailure: {error: error.message, at: Date.now()}}});
+        await badge("error");
+      }
+    } catch (failure) { console.error(`[capurnion-pat] Could not record failure: ${failure.message}`); }
+  });
   return result;
 }
 const job = async () => (await chrome.storage.session.get(JOB_KEY))[JOB_KEY];
 const paused = async () => (await chrome.storage.local.get(PAUSED_KEY))[PAUSED_KEY] === true;
 function trustedPage(sender) {
-  return sender?.id === chrome.runtime.id && sender.frameId === 0 && sender.url === PAT_CFG?.url;
+  return sender?.id === chrome.runtime.id && sender.frameId === 0 && CAPURNION_PAT.isDestination(sender.url, PAT_CFG);
+}
+async function bounded(promise, label, timeout = 10000) {
+  let timer;
+  try { return await Promise.race([promise, new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeout);
+  })]); } finally { clearTimeout(timer); }
+}
+async function setStep(current, step, pageUrl) {
+  const prior = (await chrome.storage.local.get(STATUS_KEY))[STATUS_KEY] || {};
+  await chrome.storage.local.set({[STATUS_KEY]: {...prior, step, stepAt: Date.now(),
+    ...(pageUrl ? {pageUrl} : {})}});
+}
+async function dispatch(current) {
+  if (current.acknowledged) return {allowed: true};
+  const previousTokens = (await chrome.storage.local.get(HISTORY_KEY))[HISTORY_KEY] || [];
+  current.dispatched = true; await chrome.storage.session.set({[JOB_KEY]: current});
+  await setStep(current, "Starting token renewal");
+  const accepted = await bounded(chrome.tabs.sendMessage(current.tabId,
+    {type: "pat-run", runId: current.runId, previousTokens}, {frameId: 0}), "Starting page automation");
+  if (accepted?.started !== true) return {allowed: false, retry: true};
+  current.acknowledged = true; await chrome.storage.session.set({[JOB_KEY]: current});
+  return {allowed: true};
+}
+async function checkPage(current) {
+  if (current.phase === "okta" || await paused()) return;
+  const latest = await job();
+  if (!latest || latest.runId !== current.runId) return;
+  const tab = await chrome.tabs.get(current.tabId);
+  let url;
+  try { if (typeof tab.url === "string" && tab.url) url = new URL(tab.url); } catch { /* Navigation metadata is not ready. */ }
+  if (!url || !["https:", "http:"].includes(url.protocol)) {
+    await setStep(current, "Waiting for the check tab to finish navigating"); return;
+  }
+  const pageUrl = url.origin + url.pathname; // Exclude SSO query strings/fragments.
+  if (!CAPURNION_PAT.isAccountPage(tab.url, PAT_CFG)) {
+    await setStep(current, "Waiting for sign-in to return to Snowflake", pageUrl); return;
+  }
+  let snapshot;
+  try { snapshot = await bounded(chrome.tabs.sendMessage(current.tabId, {type: "pat-inspect"}, {frameId: 0}), "Inspecting the check tab"); }
+  catch {
+    // A redirect or SPA route can leave the document without a PAT listener.
+    // Inject only into this job's owned tab inside the configured account.
+    await setStep(current, "Attaching automation to the Snowflake page", pageUrl);
+    await bounded(chrome.scripting.executeScript({target: {tabId: current.tabId, frameIds: [0]},
+      files: ["rules.generated.js", "snowflake-pat.js", "snowflake-pat-content.js"]}), "Attaching page automation");
+    snapshot = await bounded(chrome.tabs.sendMessage(current.tabId, {type: "pat-inspect"}, {frameId: 0}), "Inspecting the check tab");
+  }
+  if (typeof snapshot?.ready !== "boolean") throw new Error("Snowflake page automation did not answer its readiness check; reload Capurnion");
+  if (!current.acknowledged || !snapshot.running) await setStep(current, snapshot.step, pageUrl);
+  if (!CAPURNION_PAT.isDestination(tab.url, PAT_CFG) && snapshot.userMatches && (current.returnAttempts || 0) < 2) {
+    current.returnAttempts = (current.returnAttempts || 0) + 1;
+    await chrome.storage.session.set({[JOB_KEY]: current});
+    await setStep(current, "Returning the signed-in tab to authentication settings", pageUrl);
+    await chrome.tabs.update(current.tabId, {url: PAT_CFG.url}); return;
+  }
+  if (snapshot.ready) {
+    if (current.acknowledged && !snapshot.running) {
+      current.acknowledged = false; await chrome.storage.session.set({[JOB_KEY]: current});
+    }
+    await dispatch(current);
+  }
+}
+async function inspectOrFail(current) {
+  try { await checkPage(current); }
+  catch (error) { await finish(current, {status: "error", error: error.message}); }
 }
 function trustedPopup(sender) {
   return sender?.id === chrome.runtime.id && ["pat-popup.html", "options.html"].some(page => sender.url === chrome.runtime.getURL(page));
@@ -60,14 +137,16 @@ async function finish(current, report, close = true) {
   await remember(report);
   const prior = (await chrome.storage.local.get(STATUS_KEY))[STATUS_KEY] || {};
   const result = {...prior, ...report, phase: "complete", startedAt: current.startedAt, checkedAt: Date.now()};
+  result.step = report.status === "ok" ? "Check complete" : report.error || "Check stopped";
+  if (report.status === "error") result.lastFailure = {error: report.error, at: result.checkedAt};
   if (report.status === "ok") result.lastSuccessAt = result.checkedAt;
   await chrome.storage.local.set({[STATUS_KEY]: result});
   await badge(await paused() ? "paused" : result.status);
   await alertFailure(result);
   if (close) {
     try {
-      const tab = await chrome.tabs.get(current.tabId);
-      if (!tab.active) await chrome.tabs.remove(current.tabId);
+      // Ownership, not focus, determines which tab this job may close.
+      await chrome.tabs.remove(current.tabId);
     } catch { /* The user may already have closed the tab. */ }
   }
 }
@@ -94,25 +173,27 @@ async function startCheck(knownSession) {
   await chrome.storage.session.set({[JOB_KEY]: current});
   const prior = (await chrome.storage.local.get(STATUS_KEY))[STATUS_KEY] || {};
   await chrome.storage.local.set({[STATUS_KEY]: {...prior, status: "checking", phase: current.phase,
-    startedAt: current.startedAt, error: null, renewed: [], warnings: []}});
+    startedAt: current.startedAt, step: current.phase === "okta" ? "Restoring Okta sign-in" : "Opening Snowflake authentication settings",
+    stepAt: current.startedAt, pageUrl: null, error: null, renewed: [], warnings: []}});
   await badge("checking");
   await chrome.alarms.create(TIMEOUT_ALARM, {when: current.startedAt + JOB_LIMIT_MS});
-  if (current.phase === "okta") await chrome.alarms.create(AUTH_ALARM, {periodInMinutes: 1});
+  await chrome.alarms.create(AUTH_ALARM, {periodInMinutes: 1});
   try {
     await chrome.tabs.update(tab.id, {url: current.phase === "okta" ? `https://${OKTA_CFG.host}/app/UserHome` : PAT_CFG.url});
+    await inspectOrFail(current);
   } catch (error) { await finish(current, {status: "error", error: error.message}); }
   return {started: true};
 }
 async function advanceSignIn(current, session) {
   if (current.phase !== "okta" || session.state !== "active") return;
-  const tab = await chrome.tabs.get(current.tabId);
-  if (tab.active || await paused()) return;
+  await chrome.tabs.get(current.tabId);
+  if (await paused()) return;
   current.phase = "snowflake";
   await chrome.storage.session.set({[JOB_KEY]: current});
-  await chrome.alarms.clear(AUTH_ALARM);
   const prior = (await chrome.storage.local.get(STATUS_KEY))[STATUS_KEY] || {};
   await chrome.storage.local.set({[STATUS_KEY]: {...prior, phase: "snowflake"}});
   await chrome.tabs.update(current.tabId, {url: PAT_CFG.url});
+  await inspectOrFail(current);
 }
 async function monitor(force = false) {
   if (!CAPURNION_PAT.validConfig(PAT_CFG) || await paused()) return;
@@ -123,7 +204,7 @@ async function monitor(force = false) {
     current = null;
   }
   const session = await pollOkta();
-  if (current) { await advanceSignIn(current, session); return; }
+  if (current) { await advanceSignIn(current, session); await inspectOrFail(current); return; }
   const stored = await chrome.storage.local.get([STATUS_KEY, HISTORY_KEY]);
   const status = stored[STATUS_KEY];
   // Countdown history catches a due window between hourly checks and after sleep.
@@ -136,6 +217,11 @@ async function monitor(force = false) {
 async function handleMessage(message, sender) {
   if (trustedPopup(sender)) {
     if (message.type === "pat-check-now") return startCheck();
+    if (message.type === "pat-open-tab") {
+      const current = await job();
+      if (!current) return {error: "No check is running"};
+      await chrome.tabs.update(current.tabId, {active: true}); return {opened: true};
+    }
     if (message.type === "pat-pause") {
       await chrome.storage.local.set({[PAUSED_KEY]: message.paused === true}); await ensureAlarm();
       const current = await job();
@@ -146,6 +232,7 @@ async function handleMessage(message, sender) {
     if (message.type === "pat-status") {
       const stored = await chrome.storage.local.get([STATUS_KEY, PAUSED_KEY, OKTA_KEY]);
       return {config: PAT_CFG, status: stored[STATUS_KEY], paused: stored[PAUSED_KEY] === true, okta: stored[OKTA_KEY],
+        job: await job(),
         nextCheck: (await chrome.alarms.get(CHECK_ALARM))?.scheduledTime,
         nextPoll: (await chrome.alarms.get(POLL_ALARM))?.scheduledTime};
     }
@@ -156,9 +243,10 @@ async function handleMessage(message, sender) {
         sender.tab?.id !== current.tabId || current.dispatched || current.phase === "okta" ||
         await paused() || Date.now() - current.startedAt >= JOB_LIMIT_MS) return {allowed: false};
     const tab = await chrome.tabs.get(current.tabId);
-    const host = new URL(sender.url).hostname;
+    let host;
+    try { host = new URL(sender.url).hostname; } catch { return {allowed: false}; }
     const rule = CAPURNION_RULES.rules?.find(item => item.id === message.ruleId);
-    return {allowed: !tab.active && tab.url === sender.url &&
+    return {allowed: tab.url === sender.url &&
       (host === "app.snowflake.com" || host.endsWith(".snowflakecomputing.com")) &&
       rule?.enabled === true && rule.kind === "idp-select" && CAPURNION_MATCH.hostListed(rule, host)};
   }
@@ -166,21 +254,16 @@ async function handleMessage(message, sender) {
   const current = await job();
   if (!current || current.tabId !== sender.tab?.id || current.phase === "okta") return {allowed: false};
   const tab = await chrome.tabs.get(current.tabId);
-  if (tab.active || tab.url !== PAT_CFG.url || await paused() || Date.now() - current.startedAt >= JOB_LIMIT_MS) return {allowed: false};
+  if (!tab.url && message.type === "pat-ready") return {allowed: false, retry: true};
+  if (!CAPURNION_PAT.isDestination(tab.url, PAT_CFG) || await paused() || Date.now() - current.startedAt >= JOB_LIMIT_MS) return {allowed: false};
   if (message.type === "pat-ready") {
-    if (!current.acknowledged) {
-      const previousTokens = (await chrome.storage.local.get(HISTORY_KEY))[HISTORY_KEY] || [];
-      // Persist nonce authorization before delivery. If the acknowledgement is
-      // lost, a delivered run can still finish and repeated delivery is idempotent.
-      current.dispatched = true; await chrome.storage.session.set({[JOB_KEY]: current});
-      const accepted = await chrome.tabs.sendMessage(current.tabId, {type: "pat-run", runId: current.runId, previousTokens}, {frameId: 0});
-      if (accepted?.started !== true) return {allowed: false, retry: true};
-      current.acknowledged = true; await chrome.storage.session.set({[JOB_KEY]: current});
-    }
-    return {allowed: true};
+    return dispatch(current);
   }
   if (message.runId !== current.runId || !current.dispatched) return {allowed: false};
   if (message.type === "pat-guard") return {allowed: true};
+  if (message.type === "pat-step" && typeof message.step === "string") {
+    await setStep(current, message.step.slice(0, 200)); return {allowed: true};
+  }
   if (message.type === "pat-progress") {
     await remember(message.report);
     const prior = (await chrome.storage.local.get(STATUS_KEY))[STATUS_KEY] || {};
@@ -208,12 +291,8 @@ chrome.alarms.onAlarm.addListener(alarm => {
     }
   });
 });
-chrome.tabs.onActivated.addListener(info => {
-  serial(async () => {
-    const current = await job();
-    if (current?.tabId === info.tabId) await finish(current, {status: "error", error: "Check stopped because its background tab was activated"}, false);
-  });
-});
+// Browsers and sign-in redirects can focus the owned tab. Focus changes do not
+// cancel a job; Pause, closing the tab, or navigating away after dispatch do.
 chrome.tabs.onRemoved.addListener(tabId => {
   serial(async () => {
     const current = await job();
@@ -224,9 +303,10 @@ chrome.tabs.onUpdated.addListener((tabId, changes) => {
   serial(async () => {
     const current = await job();
     if (current?.tabId !== tabId) return;
-    if (changes.url && changes.url !== PAT_CFG?.url && changes.url !== "about:blank" && current.dispatched)
+    if (changes.url && !CAPURNION_PAT.isDestination(changes.url, PAT_CFG) && changes.url !== "about:blank" && current.dispatched)
       await finish(current, {status: "error", error: "Authentication settings changed during the renewal"});
     else if (current.phase === "okta" && changes.status === "complete") await advanceSignIn(current, await pollOkta());
+    else if (changes.status === "complete") await inspectOrFail(current);
   });
 });
 chrome.notifications?.onClicked.addListener(id => {
@@ -239,7 +319,7 @@ serial(async () => {
   const current = await job();
   if (current) {
     if (!(await chrome.alarms.get(TIMEOUT_ALARM))) await chrome.alarms.create(TIMEOUT_ALARM, {when: current.startedAt + JOB_LIMIT_MS});
-    if (current.phase === "okta" && !(await chrome.alarms.get(AUTH_ALARM))) await chrome.alarms.create(AUTH_ALARM, {periodInMinutes: 1});
+    if (!(await chrome.alarms.get(AUTH_ALARM))) await chrome.alarms.create(AUTH_ALARM, {periodInMinutes: 1});
   }
   await monitor();
   const status = (await chrome.storage.local.get(STATUS_KEY))[STATUS_KEY];

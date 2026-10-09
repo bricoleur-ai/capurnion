@@ -17,7 +17,7 @@ const cfg={enabled:true,confirmGrantsAccess:true,url:'https://app.snowflake.com/
 test('PAT readiness retries without a DOM mutation and duplicate runs execute once',async()=>{
   const h=harness(cfg.url,'<div data-testid="programmatic-access-tokens"></div><button data-testid="user-context-menu-button"></button>');
   let listener,calls=0,runs=0;
-  h.w.CAPURNION_RULES={snowflakePat:cfg};h.w.CAPURNION_PAT={validConfig:()=>true,run:async()=>{runs++;return {status:'ok'};}};
+  h.w.CAPURNION_RULES={snowflakePat:cfg};h.w.CAPURNION_PAT={...require('../snowflake-pat.js'),run:async()=>{runs++;return {status:'ok'};}};
   h.w.chrome={runtime:{id:'test',onMessage:{addListener(fn){listener=fn;}},async sendMessage(m){if(m.type==='pat-ready'){calls++;if(calls===1)throw Error('Worker not ready');return {allowed:true};}return {allowed:true};}}};
   h.load('snowflake-pat-content.js');await h.flush();assert.equal(calls,1);
   await h.poll();assert.equal(calls,2);assert.equal(h.intervals.size,0);
@@ -42,4 +42,16 @@ test('Okta credentials retry when vault availability changes without DOM activit
   h.load('okta-login-flow.js');h.load('okta-login-content.js');await h.flush();assert.equal(clicks,0);
   await h.poll(31000);assert.equal(clicks,1);assert.equal(h.w.document.querySelector('input[type="password"]').value,'test-password');
   await h.poll();assert.equal(clicks,1);h.w.dispatchEvent(new h.w.Event('pagehide'));assert.equal(h.intervals.size,0);h.close();
+});
+test('PAT listener survives homepage-to-settings SPA navigation and returns synchronous diagnostics',async()=>{
+  const h=harness('https://app.snowflake.com/testorg/testaccount/#/homepage','<button data-testid="user-context-menu-button" aria-label="Account Menu: test-user"></button>');
+  let listener;const messages=[];
+  h.w.CAPURNION_RULES={snowflakePat:cfg};h.w.CAPURNION_PAT=require('../snowflake-pat.js');
+  h.w.chrome={runtime:{id:'test',onMessage:{addListener(fn){listener=fn;}},async sendMessage(m){messages.push(m);return {allowed:true};}}};
+  h.load('snowflake-pat-content.js');assert(listener);assert.equal(messages.length,0);
+  let snapshot;listener({type:'pat-inspect'},{id:'test'},data=>snapshot=data);assert.equal(snapshot.ready,false);assert.equal(snapshot.userMatches,true);
+  h.w.history.pushState({},'',cfg.url+'?return=okta');
+  const section=h.w.document.createElement('div');section.dataset.testid='programmatic-access-tokens';h.w.document.body.append(section);
+  await h.flush();await h.poll();assert(messages.some(m=>m.type==='pat-ready'));
+  listener({type:'pat-inspect'},{id:'test'},data=>snapshot=data);assert.equal(snapshot.ready,true);h.close();
 });

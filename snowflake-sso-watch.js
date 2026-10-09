@@ -1,4 +1,4 @@
-/* Extends configured SSO detection only in a PAT job's owned, inactive tab. */
+/* Extends configured SSO detection only in a PAT job's owned tab. */
 (() => {
   "use strict";
   const M = globalThis.CAPURNION_MATCH, cfg = globalThis.CAPURNION_RULES;
