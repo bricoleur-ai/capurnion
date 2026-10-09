@@ -244,7 +244,7 @@ private `rules.json`, beside `rules`:
 "snowflakePat": {
   "enabled": true, "confirmGrantsAccess": true,
   "url": "https://app.snowflake.com/acme/xy12345/settings/authentication",
-  "expectedUser": "you@example.com", "restoreMissingAccess": true,
+  "expectedUser": "you@example.com",
   "intervalMinutes": 60, "pollMinutes": 5, "renewBelowMinutes": 120, "grantHours": 24
 }
 ```
@@ -270,7 +270,7 @@ signed in and records **active**, **signed-out** (Okta's own no-session answer) 
 (anything else, such as a bare 404, a redirect or a timeout). Only signed-out sends the check through
 Okta sign-in first. Unknown is never treated as logged out: the check takes your usual SSO flow. The
 [guide](https://bricoleur.ai/projects/capurnion/tokens-and-the-vault) covers recovery, the watchdog,
-late SSO buttons, notifications and what is stored.
+notifications and what is stored.
 
 ## CLI
 
