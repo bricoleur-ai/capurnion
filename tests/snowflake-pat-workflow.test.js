@@ -52,12 +52,12 @@ async function run(options = {}, config = cfg, otherUrl = URL) {
   await page.route("**/*", route => route.fulfill({contentType: "text/html", body: fixture(options)}));
   await page.goto(otherUrl);
   await page.addScriptTag({path: path.join(__dirname, "../snowflake-pat.js")});
-  const result = await page.evaluate(async ({config, cancelAfter}) => {
+  const result = await page.evaluate(async ({config, cancelAfter, previousTokens}) => {
     let guards = 0;
-    const report = await CAPURNION_PAT.run(document, config, {timeoutMs: 400,
+    const report = await CAPURNION_PAT.run(document, config, {timeoutMs: 400, previousTokens,
       allow: async () => !cancelAfter || ++guards < cancelAfter});
     return {report, grants: window.grants, menuClicks: window.menuClicks};
-  }, {config, cancelAfter: options.cancelAfter});
+  }, {config, cancelAfter: options.cancelAfter, previousTokens: options.previousTokens});
   await page.close();
   return result;
 }
@@ -69,6 +69,32 @@ test("timer parsing and strict two-hour boundary", () => {
   assert(api.remainingMinutes("less than 2 hours left on temporary access") < 120);
   assert.equal(api.remainingMinutes("Missing network policy"), null);
   assert.equal(api.remainingMinutes("Expires on Jan 5, 2027"), null);
+  assert.equal(api.remainingMinutes("Temporary access has expired"), 0);
+});
+test("recovers a lapsed Active token with no badge through its own kebab menu", async () => {
+  const result = await run({rows: [{name: "lapsed", timer: ""}], minutes: true}, {...cfg, restoreMissingAccess: true});
+  assert.equal(result.report.status, "ok", result.report.error);
+  assert.deepEqual(result.menuClicks, ["lapsed"]);
+  assert.deepEqual(result.grants, [{name: "lapsed", amount: "24", unit: "Hours"}]);
+  assert.deepEqual(result.report.renewed, ["lapsed"]);
+  assert.equal(result.report.tokens[0].expires, "Expires on Jan 5, 2027");
+  assert(result.report.tokens[0].bypassExpiresAt > Date.now() + 22 * 60 * 60000);
+});
+test("recovers vanished timer from an elapsed, matching window history", async () => {
+  const result = await run({rows: [{name: "lapsed", timer: ""}], previousTokens: [{name: "lapsed", expires: "Expires on Jan 5, 2027", bypassExpiresAt: Date.now() - 1000}]});
+  assert.equal(result.report.status, "ok"); assert.deepEqual(result.report.renewed, ["lapsed"]);
+});
+test("no-badge recovery still rejects unknown badges, changed menu, and wrong user", async () => {
+  const config = {...cfg, restoreMissingAccess: true};
+  const unknown = await run({rows: [{name: "unknown", timer: "Temporary access unavailable"}]}, config);
+  assert.equal(unknown.report.status, "warning"); assert.deepEqual(unknown.grants, []);
+  for (const [options, c] of [[{wrongMenu: true}, config], [{}, {...config, expectedUser: "other-user"}]]) {
+    const result = await run({...options, rows: [{name: "lapsed", timer: ""}]}, c);
+    assert.equal(result.report.status, "error"); assert.deepEqual(result.grants, []);
+  }
+});
+test("empty Active list completes without a timeout", async () => {
+  const result = await run({rows: []}); assert.equal(result.report.status, "ok"); assert.deepEqual(result.grants, []);
 });
 test("renews each due row once, skips two-hour boundary and healthy/no-bypass rows", async () => {
   const result = await run();

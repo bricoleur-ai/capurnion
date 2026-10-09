@@ -7,11 +7,14 @@
   const text = el => normalize(el?.textContent);
   const validConfig = cfg => cfg?.enabled === true && cfg.confirmGrantsAccess === true &&
     /^https:\/\/app\.snowflake\.com\/[a-z0-9_-]+\/[a-z0-9_-]+\/settings\/authentication$/.test(cfg.url) &&
-    cfg.intervalMinutes === 60 && cfg.renewBelowMinutes === 120 && cfg.grantHours === 24 &&
+    cfg.intervalMinutes === 60 && (cfg.pollMinutes === undefined || cfg.pollMinutes === 5) &&
+    (cfg.restoreMissingAccess === undefined || typeof cfg.restoreMissingAccess === "boolean") &&
+    cfg.renewBelowMinutes === 120 && cfg.grantHours === 24 &&
     typeof cfg.expectedUser === "string" && !!cfg.expectedUser.trim();
 
   function remainingMinutes(value) {
     const label = normalize(value).toLowerCase();
+    if (/^temporary access (?:has )?(?:expired|ended)$/.test(label)) return 0;
     const match = /^(?:(?:less than|<)\s+)?(\d+(?:\.\d+)?)\s+(seconds?|minutes?|hours?|days?)\s+left on temporary access$/.exec(label);
     if (!match) return null;
     const factors = {second: 1 / 60, minute: 1, hour: 60, day: 1440};
@@ -54,12 +57,28 @@
     if (new Set(result.map(item => item.name)).size !== result.length) throw new Error("Duplicate token names in PAT list");
     return result;
   }
-  const metadata = item => ({name: item.name, expires: item.expires, temporaryAccess: item.temporaryAccess, minutes: item.minutes});
+  const metadata = item => ({name: item.name, expires: item.expires, temporaryAccess: item.temporaryAccess, minutes: item.minutes,
+    bypassExpiresAt: item.minutes !== null ? Date.now() + item.minutes * 60000 : null,
+    ...(item.recovered ? {recovered: true} : {})});
 
   async function run(doc, cfg, hooks = {}) {
     const timeoutMs = hooks.timeoutMs || 20000;
     const allow = hooks.allow || (async () => true);
     const report = {status: "ok", tokens: [], renewed: [], warnings: []};
+    const readRows = () => {
+      const items = rows(doc);
+      if (!items) return null;
+      const missingPolicy = /missing network policy/i.test(text(doc.querySelector('[data-testid="pat-network-policy-disclaimer"]')));
+      for (const item of items) {
+        const previous = (hooks.previousTokens || []).find(token => token.name === item.name && token.expires === item.expires);
+        if (!item.temporaryAccess && (cfg.restoreMissingAccess === true ||
+            (missingPolicy && Number.isFinite(previous?.bypassExpiresAt) &&
+            previous.bypassExpiresAt > 0 && previous.bypassExpiresAt <= Date.now()))) {
+          item.minutes = 0; item.recovered = true;
+        }
+      }
+      return items;
+    };
     const guard = async () => {
       if (!(await allow())) throw new Error("Check cancelled, paused, or background tab was activated");
       scope(doc, cfg);
@@ -91,18 +110,18 @@
       if (!enabled(el)) throw new Error("Expected control is not clickable");
       el.click();
     };
-    const current = name => (rows(doc) || []).find(item => item.name === name);
+    const current = name => (readRows() || []).find(item => item.name === name);
     const visibleDialog = () => one(doc, DIALOG);
     try {
       await wait(() => {
-        const items = rows(doc);
+        const items = readRows();
         const user = doc.querySelector('[data-testid="user-context-menu-button"]');
-        return items?.length && user ? items : null;
+        return items && user ? items : null;
       });
       await guard();
       if (one(doc, '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]'))
         throw new Error("Another dialog or menu is already open");
-      const initial = rows(doc);
+      const initial = readRows();
       report.tokens = initial.map(metadata);
       for (const item of initial) {
         if (item.temporaryAccess && item.minutes === null) report.warnings.push(`${item.name}: unrecognized temporary-access timer; skipped`);
@@ -158,7 +177,7 @@
             updated.minutes <= 24 * 60 ? updated : null;
         });
         report.renewed.push(candidate.name);
-        report.tokens = (rows(doc) || []).map(metadata);
+        report.tokens = (readRows() || []).map(metadata);
         await hooks.progress?.({...report});
         console.log(`[capurnion-pat] renewed ${renewed.name}: 24 Hours`);
       }

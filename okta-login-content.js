@@ -27,6 +27,7 @@
   const log = (...a) => console.log(TAG, ...a);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const done = { login: false, factor: false, sms: false, fill: false };
+  let loginRetryAt = 0;
 
   async function ask(type) {
     try {
@@ -53,11 +54,16 @@
     const creds = await ask("okta-creds");
     if (!creds) {
       done.login = false;
+      loginRetryAt = Date.now() + 30000;
       log("could not get credentials from the vault (create/unlock it once in Settings & vault)");
       return;
     }
+    if (!form.user.isConnected || !form.pass.isConnected || flow.detectState(document) !== "login") {
+      creds.username = ""; creds.password = ""; done.login = false; return;
+    }
     setInputValue(form.user, creds.username);
     setInputValue(form.pass, creds.password);
+    creds.username = ""; creds.password = "";
     log("filled credentials; signing in");
     form.submit.click();
   }
@@ -102,7 +108,7 @@
     } catch (_e) {
       return;
     }
-    if (state === "login" && !done.login) {
+    if (state === "login" && !done.login && Date.now() >= loginRetryAt) {
       const form = flow.loginForm(document);
       if (form) doLogin(form);
     } else if (state === "factor-select" && !done.factor) {
@@ -126,6 +132,9 @@
 
   const observer = new MutationObserver(tick);
   observer.observe(document.documentElement, { childList: true, subtree: true });
+  // Vault availability and a session timeout can change without a DOM mutation.
+  const poll = setInterval(tick, POLL_MS);
+  window.addEventListener("pagehide", () => { observer.disconnect(); clearInterval(poll); }, {once: true});
   tick();
   log("armed on", location.host);
 })();

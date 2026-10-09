@@ -10,9 +10,11 @@ async function refresh() {
   if (!data?.config) throw new Error(data?.error || "Renewal capability is unavailable");
   const status = data.status || {};
   isPaused = data.paused;
-  const labels = {checking: "Checking…", ok: "Last check succeeded", error: "Last check failed", warning: "Last check has skipped tokens"};
+  const labels = {checking: status.phase === "okta" ? "Restoring Okta sign-in…" : "Checking Snowflake…", ok: "Last check succeeded", error: "Last check failed", warning: "Last check has skipped tokens"};
   byId("status").textContent = isPaused ? "Paused" : labels[status.status] || "Waiting for the first check";
-  byId("times").textContent = `Last completed check: ${date(status.checkedAt)}\nNext check: ${isPaused ? "Paused" : date(data.nextCheck)}`;
+  byId("times").textContent = `Last completed check: ${date(status.checkedAt)}\nNext hourly check: ${isPaused ? "Paused" : date(data.nextCheck)}\nNext sign-in/retry poll: ${isPaused ? "Paused" : date(data.nextPoll)}`;
+  const sessionLabels = {active: "Signed in", "signed-out": "Signed out", unknown: "Could not verify"};
+  byId("okta").textContent = data.okta ? `Okta: ${sessionLabels[data.okta.state] || data.okta.state} (${date(data.okta.checkedAt)})${data.okta.error ? `. ${data.okta.error}` : ""}` : "";
   byId("times").style.whiteSpace = "pre-line";
   byId("error").textContent = [status.error, ...(status.warnings || [])].filter(Boolean).join("\n");
   byId("pause").textContent = isPaused ? "Resume" : "Pause";

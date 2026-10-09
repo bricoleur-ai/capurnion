@@ -4,7 +4,7 @@
 <body>
   <main>
     <header><span class="brand">Capurnion</span><h1>Settings &amp; vault</h1><p>Your browser automations and secrets, on this device.</p></header>
-    <section id="pat" hidden><h2>Snowflake temporary access</h2><p>Checks hourly in a new background tab. Renews tokens below two hours to 24 hours, then closes the tab.</p><p id="pat-status" role="status"></p><div class="buttons"><button id="pat-check">Check now</button><button id="pat-pause">Pause</button><a id="pat-settings" target="_blank" rel="noopener">Open Snowflake settings</a></div></section>
+    <section id="pat" hidden><h2>Snowflake temporary access</h2><p>Checks hourly in a new background tab, with five-minute sign-in and retry polling. Restores missing access and renews windows below two hours to 24 hours, then closes the tab.</p><p id="pat-status" role="status"></p><div class="buttons"><button id="pat-check">Check now</button><button id="pat-pause">Pause</button><a id="pat-settings" target="_blank" rel="noopener">Open Snowflake settings</a></div></section>
     <section id="vault">
       <div class="section-heading"><h2>Encrypted vault</h2><button id="lock" hidden>Lock management</button></div>
       <p>Secrets stay encrypted on this device. Automations can always use saved secrets, including after Chrome restarts. Locking protects viewing and editing in this panel; it does not stop automations. Management locks when this panel closes or after five idle minutes.</p>

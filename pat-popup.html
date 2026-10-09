@@ -7,9 +7,10 @@
 </head>
 <body>
   <h1>Snowflake PAT renewal</h1>
-  <p>Checks hourly. Renews temporary access to 24 hours when fewer than 2 hours remain.</p>
+  <p>Checks hourly, with five-minute sign-in and retry polling. Restores missing access and renews windows below 2 hours to 24 hours.</p>
   <p id="status" role="status">Loading…</p>
   <p id="times"></p>
+  <p id="okta"></p>
   <p id="error" role="alert"></p>
   <table hidden id="tokens"><thead><tr><th>Token</th><th>Temporary access</th><th>Expiration</th></tr></thead><tbody></tbody></table>
   <div class="controls"><button id="check">Check now</button><button id="pause">Pause</button><a id="settings" target="_blank" rel="noopener">Open settings</a></div>

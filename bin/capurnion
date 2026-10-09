@@ -161,6 +161,10 @@ def validate(cfg):
             for key, value in (("intervalMinutes", 60), ("renewBelowMinutes", 120), ("grantHours", 24)):
                 if type(pat.get(key)) is not int or pat[key] != value:
                     errs.append(f"snowflakePat.{key} must be {value}")
+            if "pollMinutes" in pat and (type(pat["pollMinutes"]) is not int or pat["pollMinutes"] != 5):
+                errs.append("snowflakePat.pollMinutes must be 5")
+            if "restoreMissingAccess" in pat and not isinstance(pat["restoreMissingAccess"], bool):
+                errs.append("snowflakePat.restoreMissingAccess must be true or false")
             if not isinstance(pat.get("expectedUser"), str) or not pat.get("expectedUser", "").strip():
                 errs.append("snowflakePat.expectedUser must name the signed-in Snowflake user")
             if pat.get("enabled") and pat.get("confirmGrantsAccess") is not True:
@@ -253,7 +257,8 @@ def cmd_sync(args):
             continue
         scripts.append({
             "matches": [f"*://{h}/*" for h in hosts],
-            "js": ["rules.generated.js", "matcher.js", "engine.js"],
+            "js": ["rules.generated.js", "matcher.js", "engine.js"] +
+                  (["snowflake-sso-watch.js"] if cfg.get("snowflakePat", {}).get("enabled") else []),
             "run_at": "document_idle",
             "all_frames": all_frames,
         })
@@ -274,7 +279,7 @@ def cmd_sync(args):
             "all_frames": False,
         })
         manifest["minimum_chrome_version"] = "120"
-        manifest["permissions"] = ["alarms", "storage"]
+        manifest["permissions"] = ["alarms", "storage", "notifications"]
         manifest["background"] = {"service_worker": "background.js"}
         manifest["action"] = {"default_title": "Capurnion — Snowflake PAT renewal", "default_popup": "pat-popup.html"}
     vault = cfg.get("vault", {})
@@ -288,6 +293,8 @@ def cmd_sync(args):
         manifest["options_ui"] = {"page": "options.html", "open_in_tab": True}
     okta = cfg.get("oktaLogin", {})
     if okta.get("enabled"):
+        if pat.get("enabled"):
+            manifest.setdefault("host_permissions", []).append(f"https://{okta['host']}/*")
         scripts.append({
             "matches": [f"https://{okta['host']}/*"],
             "js": ["rules.generated.js", "okta-login-flow.js", "okta-login-content.js"],
@@ -334,7 +341,7 @@ def cmd_sync(args):
     if not scripts and not vault.get("enabled"):
         print(f"  {YEL}no enabled rules -- the extension will do nothing{R}")
     if pat.get("enabled"):
-        print("  Snowflake PAT renewal: hourly; below 2 hours -> grant 24 hours")
+        print("  Snowflake PAT renewal: hourly + 5-minute Okta/session and retry watchdog; below 2 hours -> grant 24 hours")
     if vault.get("enabled"):
         print("  Local encrypted vault: extension Options -> manage secrets; automation access persists while management is locked")
     if okta.get("enabled"):
@@ -543,7 +550,7 @@ def cmd_doctor(args):
 
     artifacts = ["matcher.js", "engine.js"]
     if cfg.get("snowflakePat", {}).get("enabled"):
-        artifacts += ["background.js", "snowflake-pat.js", "snowflake-pat-content.js", "snowflake-pat-background.js", "pat-popup.html", "pat-popup.js", "pat-popup.css"]
+        artifacts += ["background.js", "snowflake-pat.js", "snowflake-pat-content.js", "snowflake-pat-background.js", "okta-session.js", "snowflake-sso-watch.js", "notification-icon.png", "pat-popup.html", "pat-popup.js", "pat-popup.css"]
     if cfg.get("vault", {}).get("enabled"):
         artifacts += ["background.js", "vault.js", "vault-device-key.js", "vault-runtime.js", "options.html", "options.js", "options.css"]
     if cfg.get("oktaLogin", {}).get("enabled"):

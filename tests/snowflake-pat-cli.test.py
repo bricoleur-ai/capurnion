@@ -21,7 +21,7 @@ class PatConfigTests(unittest.TestCase):
         for key, value in (("url", "https://app.snowflake.com/*"),
                            ("confirmGrantsAccess", False), ("grantHours", 48),
                            ("intervalMinutes", True), ("renewBelowMinutes", 180),
-                           ("expectedUser", "")):
+                           ("expectedUser", ""), ("pollMinutes", 1), ("restoreMissingAccess", "yes")):
             changed = copy.deepcopy(CONFIG)
             changed["snowflakePat"][key] = value
             self.assertTrue(MODULE["validate"](changed)[0], key)
@@ -41,7 +41,7 @@ class PatConfigTests(unittest.TestCase):
                     fn(None)
                     manifest = json.loads(pathlib.Path(namespace["MANIFEST"]).read_text())
                     if enabled:
-                        self.assertEqual(manifest["permissions"], ["alarms", "storage"])
+                        self.assertEqual(manifest["permissions"], ["alarms", "storage", "notifications"])
                         self.assertEqual(manifest["content_scripts"][0]["matches"], [CONFIG["snowflakePat"]["url"]])
                         self.assertEqual(manifest["background"]["service_worker"], "background.js")
                     else:
@@ -49,6 +49,33 @@ class PatConfigTests(unittest.TestCase):
                         self.assertNotIn("background", manifest)
                         self.assertNotIn("content_scripts", manifest)
                         self.assertNotIn('"snowflakePat"', pathlib.Path(namespace["GENERATED"]).read_text())
+            finally:
+                namespace.update(original)
+
+    def test_combined_okta_permissions_and_recovery_configuration(self):
+        fn = MODULE["cmd_sync"]
+        namespace = fn.__globals__
+        original = {key: namespace[key] for key in ("RULES", "MANIFEST", "GENERATED")}
+        config = copy.deepcopy(CONFIG)
+        config["snowflakePat"].update(pollMinutes=5, restoreMissingAccess=True)
+        config["vault"] = {"enabled": True}
+        config["oktaLogin"] = {"enabled": True, "confirmAutomatesMfa": True,
+                               "host": "example.okta.com", "smsCodeUrl": "https://sms.example.com/code"}
+        config["rules"] = [{"id": "sso", "enabled": True, "kind": "idp-select",
+                            "hosts": ["app.snowflake.com"], "require": {"pageText": "sign in to testaccount"},
+                            "click": {"label": "sign in with okta"}}]
+        self.assertEqual(MODULE["validate"](config)[0], [])
+        with tempfile.TemporaryDirectory(prefix="capurnion-combined-cli-") as directory:
+            try:
+                for key, filename in (("RULES", "rules.json"), ("MANIFEST", "manifest.json"), ("GENERATED", "rules.generated.js")):
+                    namespace[key] = str(pathlib.Path(directory) / filename)
+                pathlib.Path(namespace["RULES"]).write_text(json.dumps(config))
+                fn(None)
+                manifest = json.loads(pathlib.Path(namespace["MANIFEST"]).read_text())
+                self.assertEqual(manifest["host_permissions"], ["https://example.okta.com/*", "https://sms.example.com/*"])
+                self.assertIn("snowflake-sso-watch.js", manifest["content_scripts"][0]["js"])
+                self.assertIn("notifications", manifest["permissions"])
+                self.assertIn('"restoreMissingAccess": true', pathlib.Path(namespace["GENERATED"]).read_text())
             finally:
                 namespace.update(original)
 
