@@ -252,18 +252,18 @@ private `rules.json`, beside `rules`:
 `confirmGrantsAccess` is your deliberate opt-in, `expectedUser` must match the account menu's
 accessible label, and the URL must be one exact HTTPS settings page. The numbers are fixed, and
 `validate` rejects others: a check every 60 minutes, renewal below 120 minutes, grants of 24 hours,
-and a watchdog poll every 5 minutes that retries failed checks. Run `capurnion validate` and `sync`,
-then reload the extension at `chrome://extensions` yourself: nothing, `doctor` included, can tell
-which version Chrome is running. To turn renewal off, set `"enabled": false` in the `snowflakePat`
-block, run `capurnion sync`, and reload. Chrome must be running.
+and a 5-minute watchdog poll that retries failed checks. Run `capurnion validate` and `sync`, then
+reload the extension at `chrome://extensions` yourself: nothing, `doctor` included, can tell which
+version Chrome is running. To turn it off, set `"enabled": false` in this block, sync and reload.
 
 A check waits up to 60 seconds for the Active list to show at least one token, and reports a failure,
 never success, if none arrive (so an account with no tokens fails too). A grant counts only once its
-dialog has closed and the same row shows 23 to 24 hours left. A lapsed bypass can leave a token on the
-Active list with no timer at all: `restoreMissingAccess: true` gives every such token a grant through
-its own menu, and without it only a token whose recorded window has passed while the page reports a
-missing network policy gets one. The key is optional, and your call. The popup shows the current step
-and page, **Check now**, **Pause**, **Open check tab**, and how many tokens the last check read and renewed.
+dialog has closed and the same row shows 23 to 24 hours left. A lapsed bypass can leave an Active
+token with no timer: `restoreMissingAccess: true` grants every such token through its own menu;
+without it, only a token whose recorded window has passed while the page reports a missing network
+policy gets one. But no timer can also mean a healthy token that a network policy protects, which the
+key would grant anyway: it is optional, and your call. The popup shows the current step and page,
+**Check now**, **Pause**, **Open check tab**, and how many tokens the last check read and renewed.
 
 **Okta session states.** With Okta sign-in also on, each poll asks your Okta host whether you are
 signed in and records **active**, **signed-out** (Okta's own no-session answer) or **unknown**

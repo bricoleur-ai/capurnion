@@ -589,8 +589,9 @@ def cmd_doctor(args):
             print(f"  {YEL}warn{R}  not loaded in Chrome -- chrome://extensions -> Load unpacked -> {ROOT}")
         elif "manifest" not in rec:
             if rec.get("path") == ROOT:
-                print(f"  {GRN}ok{R}    registered in Chrome at this extension's path")
-                print(f"  {DIM}note  Chrome did not store a manifest here; running state/version cannot be verified from preferences{R}")
+                # Registered at this path, but with no stored manifest Chrome's preferences
+                # cannot show that it loaded, or which version is running.
+                print(f"  {B}note{R}  registered; not verified loaded -- Chrome stored no manifest for this path")
                 if rec.get("disable_reasons"):
                     print(f"  {YEL}warn{R}  Chrome records disable reasons -- inspect chrome://extensions")
             else:

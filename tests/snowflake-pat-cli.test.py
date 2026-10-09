@@ -119,6 +119,40 @@ class PatConfigTests(unittest.TestCase):
             finally:
                 namespace.update(original)
 
+    def test_doctor_on_macos_says_registered_is_not_verified_loaded(self):
+        namespace = MODULE["cmd_doctor"].__globals__
+        original = {key: namespace[key] for key in ("RULES", "MANIFEST", "GENERATED")}
+        root = namespace["ROOT"]
+        ext_id = namespace["chrome_extension_id"](root)
+        cases = (
+            ({ext_id: {"path": root}}, "registered; not verified loaded"),
+            ({}, "not loaded in Chrome"),
+            ({ext_id: {"path": root + "-elsewhere"}}, "incomplete Chrome registration"),
+        )
+        with tempfile.TemporaryDirectory(prefix="capurnion-doctor-mac-") as directory:
+            try:
+                for key, filename in (("RULES", "rules.json"), ("MANIFEST", "manifest.json"), ("GENERATED", "rules.generated.js")):
+                    namespace[key] = str(pathlib.Path(directory) / filename)
+                pathlib.Path(namespace["RULES"]).write_text(json.dumps({"version": 1, "rules": []}))
+                with contextlib.redirect_stdout(io.StringIO()):
+                    namespace["cmd_sync"](None)
+                prefs = pathlib.Path(directory) / "Library/Application Support/Google/Chrome/Default/Secure Preferences"
+                prefs.parent.mkdir(parents=True)
+                for settings, expected in cases:
+                    prefs.write_text(json.dumps({"extensions": {"settings": settings, "ui": {"developer_mode": True}}}))
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output), mock.patch("sys.platform", "darwin"), \
+                            mock.patch.dict("os.environ", {"HOME": directory}):
+                        namespace["cmd_doctor"](None)
+                    text = output.getvalue()
+                    self.assertIn(expected, text)
+                    self.assertNotIn("registered in Chrome at this extension's path", text)
+                    self.assertIn("no problems", text)
+                    if expected != "registered; not verified loaded":
+                        self.assertIn("warn", text)
+            finally:
+                namespace.update(original)
+
 
 if __name__ == "__main__":
     unittest.main()
