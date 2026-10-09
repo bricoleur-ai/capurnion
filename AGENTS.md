@@ -144,7 +144,8 @@ token with under two hours left. Rules you must honor:
 - **`restoreMissingAccess: true` is the user's call, not yours.** It gives every Active token
   with no timer a fresh grant, even with no history. Without it, a vanished timer is restored
   only when stored history shows its window has passed and the page reports a missing network
-  policy. Leave the key out unless they asked for it.
+  policy. No timer can also mean a healthy token that a network policy protects, and the key
+  would grant that one too. Leave the key out unless they asked for it.
 - **Late SSO recovery** (`snowflake-sso-watch.js`) rides along with the SSO rules once the
   capability is on. It clicks only in the check's own tab (focused or not), on Snowflake's hosts, for
   an enabled `idp-select` rule whose guards pass, and only a button whose label mentions Okta or
