@@ -4,7 +4,7 @@
    *
    * Run this in the tab that is sitting on the login page you want to automate --
    * e.g. Claude in Chrome's javascript_tool, or paste it into DevTools. It reads
-   * the page and returns the everything needed to write a rule: the host, the
+   * the page and returns everything needed to write a rule: the host, the
    * headings you could guard on, and every clickable label, with SSO-looking ones
    * sorted first.
    *

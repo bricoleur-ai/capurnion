@@ -183,7 +183,7 @@ def validate(cfg):
                 errs.append("oktaLogin.enabled must be true or false")
             host = okta.get("host", "")
             if not isinstance(host, str) or not host or "/" in host or ":" in host:
-                errs.append("oktaLogin.host must be a bare hostname (e.g. tenant.okta.com)")
+                errs.append("oktaLogin.host must be a bare hostname (e.g. example.okta.com)")
             elif PLACEHOLDER.search(host) and okta.get("enabled"):
                 errs.append("oktaLogin.host is still a placeholder")
             url = okta.get("smsCodeUrl", "")
@@ -565,13 +565,18 @@ def cmd_doctor(args):
     # chrome registration
     ext_id = chrome_extension_id(ROOT)
     print(f"  {DIM}extension id for {ROOT}: {ext_id}{R}")
+    # Reads Chrome's default profile at its macOS location; other platforms skip this check.
     sp = os.path.expanduser("~/Library/Application Support/Google/Chrome/Default/Secure Preferences")
-    try:
-        with open(sp) as f:
-            prefs = json.load(f)
-    except Exception:
-        print(f"  {DIM}skip  could not read Chrome Secure Preferences{R}")
+    prefs = None
+    if sys.platform != "darwin":
+        print(f"  {DIM}skip  Chrome registration check is macOS only{R}")
     else:
+        try:
+            with open(sp) as f:
+                prefs = json.load(f)
+        except Exception:
+            print(f"  {DIM}skip  could not read Chrome Secure Preferences{R}")
+    if prefs is not None:
         settings = (prefs.get("extensions") or {}).get("settings") or {}
         rec = settings.get(ext_id)
         devmode = ((prefs.get("extensions") or {}).get("ui") or {}).get("developer_mode")

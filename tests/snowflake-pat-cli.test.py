@@ -1,10 +1,13 @@
 """Validation and manifest generation without touching private configuration."""
+import contextlib
 import copy
+import io
 import json
 import pathlib
 import runpy
 import tempfile
 import unittest
+from unittest import mock
 
 MODULE = runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / "bin/capurnion"))
 CONFIG = {"version": 1, "rules": [], "snowflakePat": {
@@ -95,6 +98,23 @@ class PatConfigTests(unittest.TestCase):
                 self.assertEqual(manifest["options_ui"], {"page": "options.html", "open_in_tab": True})
                 self.assertNotIn("content_scripts", manifest)
                 self.assertNotIn("host_permissions", manifest)
+            finally:
+                namespace.update(original)
+
+    def test_doctor_says_chrome_check_is_macos_only_elsewhere(self):
+        namespace = MODULE["cmd_doctor"].__globals__
+        original = {key: namespace[key] for key in ("RULES", "MANIFEST", "GENERATED")}
+        with tempfile.TemporaryDirectory(prefix="capurnion-doctor-cli-") as directory:
+            try:
+                for key, filename in (("RULES", "rules.json"), ("MANIFEST", "manifest.json"), ("GENERATED", "rules.generated.js")):
+                    namespace[key] = str(pathlib.Path(directory) / filename)
+                pathlib.Path(namespace["RULES"]).write_text(json.dumps({"version": 1, "rules": []}))
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    namespace["cmd_sync"](None)
+                    with mock.patch("sys.platform", "linux"):
+                        namespace["cmd_doctor"](None)
+                self.assertIn("macOS only", output.getvalue())
             finally:
                 namespace.update(original)
 

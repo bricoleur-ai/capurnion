@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-globalThis.crypto = require("node:crypto").webcrypto;
+if (!globalThis.crypto?.subtle) globalThis.crypto = require("node:crypto").webcrypto;
 const vault = require("../vault.js");
 const phrase = "correct horse battery staple";
 const data = {entries: [{id: "test-id", name: "snowflake-test-key", value: "private-test-token-123456789", updatedAt: 1791413188411}]};

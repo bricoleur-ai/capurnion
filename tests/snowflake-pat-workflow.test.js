@@ -7,6 +7,7 @@ const fixture = require("./pat-fixture.js");
 const api = require("../snowflake-pat.js");
 const URL = "https://app.snowflake.com/testorg/testaccount/settings/authentication";
 const cfg = {enabled: true, confirmGrantsAccess: true, url: URL, expectedUser: "test-user", intervalMinutes: 60, renewBelowMinutes: 120, grantHours: 24};
+const NO_BROWSER = "needs a Playwright browser: npx playwright install chromium";
 let browser;
 const ready = (async () => {
   if (process.env.JSDOM_MODULE) {
@@ -43,9 +44,22 @@ const ready = (async () => {
     };
   } else {
     const {chromium} = require(process.env.PLAYWRIGHT_MODULE || "playwright");
-    browser = await chromium.launch({headless: true, ...(process.env.CHROMIUM_EXECUTABLE ? {executablePath: process.env.CHROMIUM_EXECUTABLE} : {})});
+    try {
+      browser = await chromium.launch({headless: true, ...(process.env.CHROMIUM_EXECUTABLE ? {executablePath: process.env.CHROMIUM_EXECUTABLE} : {})});
+    } catch (error) {
+      // Only a missing downloaded browser skips; any other launch failure still fails the tests.
+      if (process.env.CHROMIUM_EXECUTABLE || !/Executable doesn't exist/.test(error.message)) throw error;
+      browser = null;
+    }
   }
 })();
+function browserTest(name, fn) {
+  test(name, async t => {
+    await ready;
+    if (!browser) return t.skip(NO_BROWSER);
+    return fn(t);
+  });
+}
 async function run(options = {}, config = cfg, otherUrl = URL) {
   await ready;
   const page = await browser.newPage();
@@ -71,7 +85,7 @@ test("timer parsing and strict two-hour boundary", () => {
   assert.equal(api.remainingMinutes("Expires on Jan 5, 2027"), null);
   assert.equal(api.remainingMinutes("Temporary access has expired"), 0);
 });
-test("recovers a lapsed Active token with no badge through its own kebab menu", async () => {
+browserTest("recovers a lapsed Active token with no badge through its own kebab menu", async () => {
   const result = await run({rows: [{name: "lapsed", timer: ""}], minutes: true}, {...cfg, restoreMissingAccess: true});
   assert.equal(result.report.status, "ok", result.report.error);
   assert.deepEqual(result.menuClicks, ["lapsed"]);
@@ -80,11 +94,11 @@ test("recovers a lapsed Active token with no badge through its own kebab menu", 
   assert.equal(result.report.tokens[0].expires, "Expires on Jan 5, 2027");
   assert(result.report.tokens[0].bypassExpiresAt > Date.now() + 22 * 60 * 60000);
 });
-test("recovers vanished timer from an elapsed, matching window history", async () => {
+browserTest("recovers vanished timer from an elapsed, matching window history", async () => {
   const result = await run({rows: [{name: "lapsed", timer: ""}], previousTokens: [{name: "lapsed", expires: "Expires on Jan 5, 2027", bypassExpiresAt: Date.now() - 1000}]});
   assert.equal(result.report.status, "ok"); assert.deepEqual(result.report.renewed, ["lapsed"]);
 });
-test("no-badge recovery still rejects unknown badges, changed menu, and wrong user", async () => {
+browserTest("no-badge recovery still rejects unknown badges, changed menu, and wrong user", async () => {
   const config = {...cfg, restoreMissingAccess: true};
   const unknown = await run({rows: [{name: "unknown", timer: "Temporary access unavailable"}]}, config);
   assert.equal(unknown.report.status, "warning"); assert.deepEqual(unknown.grants, []);
@@ -93,16 +107,16 @@ test("no-badge recovery still rejects unknown badges, changed menu, and wrong us
     assert.equal(result.report.status, "error"); assert.deepEqual(result.grants, []);
   }
 });
-test("empty Active list completes without a timeout", async () => {
+browserTest("empty Active list completes without a timeout", async () => {
   const result = await run({rows: []}); assert.equal(result.report.status, "ok"); assert.deepEqual(result.grants, []);
 });
-test("renews each due row once, skips two-hour boundary and healthy/no-bypass rows", async () => {
+browserTest("renews each due row once, skips two-hour boundary and healthy/no-bypass rows", async () => {
   const result = await run();
   assert.equal(result.report.status, "ok", result.report.error);
   assert.deepEqual(result.grants, [{name: "due-one", amount: "24", unit: "Hours"}, {name: "due-two", amount: "24", unit: "Hours"}]);
   assert.deepEqual(result.report.renewed, ["due-one", "due-two"]);
 });
-test("selects Hours when the modal initially shows Minutes", async () => {
+browserTest("selects Hours when the modal initially shows Minutes", async () => {
   const result = await run({minutes: true});
   assert.equal(result.report.status, "ok", result.report.error);
   assert(result.grants.every(grant => grant.amount === "24" && grant.unit === "Hours"));
@@ -120,24 +134,24 @@ for (const [name, options, config, url] of [
   ["paused mid-workflow", {cancelAfter: 5}],
   ["duplicate row identities", {rows: [{name: "same", timer: "1 hour left on temporary access"}, {name: "same", timer: "1 hour left on temporary access"}]}],
 ]) {
-  test(`does not grant for ${name}`, async () => {
+  browserTest(`does not grant for ${name}`, async () => {
     const result = await run(options, config || cfg, url || URL);
     assert.equal(result.report.status, "error");
     assert.deepEqual(result.grants, []);
   });
 }
-test("unknown timers are skipped and reported", async () => {
+browserTest("unknown timers are skipped and reported", async () => {
   const result = await run({rows: [{name: "unknown", timer: "Temporary access unavailable"}]});
   assert.equal(result.report.status, "warning");
   assert.deepEqual(result.grants, []);
 });
-test("a submitted grant is not reported successful without a changed timer", async () => {
+browserTest("a submitted grant is not reported successful without a changed timer", async () => {
   const result = await run({noConfirmation: true});
   assert.equal(result.grants.length, 1);
   assert.equal(result.report.status, "error");
   assert.deepEqual(result.report.renewed, []);
 });
-test("existing SSO engine runs before PAT content announces readiness", async () => {
+browserTest("existing SSO engine runs before PAT content announces readiness", async () => {
   await ready;
   const page = await browser.newPage();
   await page.route("**/*", route => route.fulfill({contentType: "text/html", body: fixture({loginFirst: true})}));
@@ -157,4 +171,4 @@ test("existing SSO engine runs before PAT content announces readiness", async ()
   assert.deepEqual(await page.evaluate(() => messages.map(message => message.type)), ["pat-ready"]);
   await page.close();
 });
-test("close workflow test browser", async () => { await ready; await browser.close(); });
+browserTest("close workflow test browser", () => browser.close());

@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {JSDOM} = require(process.env.JSDOM_MODULE || "jsdom");
 const webcrypto = require("node:crypto").webcrypto;
-globalThis.crypto = webcrypto;
+if (!globalThis.crypto?.subtle) globalThis.crypto = webcrypto;
 const api = require("../vault.js");
 const {backend, worker} = require("./vault-browser-harness.js");
 const KEY = "capurnionEncryptedVault", phrase = "correct horse battery staple";
