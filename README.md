@@ -17,7 +17,7 @@ flowchart LR
 
 ## What it does
 
-- **Clicks the "Sign in with &lt;provider&gt;" button** on the login pages you name in one JSON file:
+- **Clicks the "Sign in with *provider*" button** on the login pages you name in one JSON file:
   once per page load, and only when the host, your page guards and the button's label all match.
 - **Signs in to one Okta tenant, if you opt in.** Your email and password come from a local encrypted
   vault, and the SMS code from a small relay such as 2fu.
@@ -47,7 +47,7 @@ hosts of your enabled rules, and those rules. On those hosts a content script wa
 renders. When every guard of a rule passes and its button appears, it clicks once and stops; if not,
 it gives up after 15 seconds by default. The decision lives in `matcher.js`, and `capurnion test` runs
 that same file, so a dry run and the browser cannot disagree. The vault, Okta sign-in and Snowflake
-renewal run in a service worker that loads only what you enable. The
+renewal add a service worker that loads only what you enable. The
 [technical brief](https://bricoleur.ai/projects/capurnion/how-it-works) walks through it.
 
 ## What it deliberately does not do
@@ -58,7 +58,7 @@ renewal run in a service worker that loads only what you enable. The
 - **No typing from rules.** A rule only clicks. The only fields capurnion fills belong to the two
   opt-in workflows: your Okta sign-in, and the Snowflake bypass duration.
 - **No permissions you did not ask for.** Disabled rules ship nothing, and `init` starts with none.
-- **No server of its own, and nothing in sync storage.** Secrets stay encrypted in this Chrome profile.
+- **No server of its own, and nothing in sync storage.** Secrets are encrypted at rest in this profile.
   The only requests it makes itself go to your 2fu relay and your Okta host's session endpoint, once
   you configure them. It never reads or saves Snowflake token secrets, Okta session IDs or cookies.
 - **No build step and no runtime dependencies.** Chrome loads the plain JavaScript as it is; the CLI
@@ -147,7 +147,7 @@ rules only.
 | `kind` | Clicks | |
 |---|---|---|
 | `idp-select` | "Sign in with Okta / Google / Microsoft / SSO" | Navigational: picks an identity provider and grants nothing. The default; covers almost every case. |
-| `session-continue` | "Continue as &lt;user&gt;", "Stay signed in?" | Grants nothing, but clicks past a screen you may have wanted to read. |
+| `session-continue` | "Continue as *user*", "Stay signed in?" | Grants nothing, but clicks past a screen you may have wanted to read. |
 | `consent-grant` | "Allow" / "Authorize" on an OAuth consent screen | **Grants an application access to your account.** Needs `"confirmGrantsAccess": true`; the engine refuses it otherwise, and `validate` errors. |
 
 Scope a `consent-grant` rule to one host. On a shared IdP domain such as `accounts.google.com` or
@@ -160,6 +160,39 @@ Each capability is off until you enable it, and each needs Chrome 120 or newer. 
 | Snowflake renewal | `alarms`, `storage`, `notifications`; the service worker and popup; a content script on the one settings URL, and the late-SSO watch beside your SSO rules. |
 | Vault | `storage`, and `unlimitedStorage` so the device key survives eviction; the settings page. No website permissions. |
 | Okta sign-in | `storage` and the service worker; a content script on the one Okta host; the relay's origin. With renewal on too, the Okta host, for the session check. |
+
+**Where vault secrets go.** Secrets are encrypted at rest in this profile's local extension storage,
+and decrypted in two places. The Settings & vault panel holds every entry while management is
+unlocked, and clears them when it locks. The service worker decrypts the vault on each use with the
+device key, keeps the one value asked for and clears the rest, whether or not management is locked.
+The only code that asks the worker for secrets is Okta sign-in, for its two named entries. The worker
+hands them only to capurnion's content script in the top frame of a page on the configured Okta
+host, and its sender check enforces all three. That script asks only while the sign-in form is
+showing, and types the values into it, so from then on **the page can read your password**, as with
+any password manager.
+
+## The local encrypted vault
+
+Add `"vault": { "enabled": true }` beside `rules`, sync, and reload, then open **Settings & vault** from
+the toolbar icon (through the popup's button when Snowflake renewal is on) or **Extension options**.
+Create a vault with a passphrase of at least 12 characters, then add, edit, reveal and delete secrets.
+Names and values are stored encrypted together in this profile's local extension storage: never in
+`rules.json`, the generated config or browser sync storage.
+
+Encryption is Web Crypto AES-256-GCM with a fresh 96-bit nonce on every save, under a key derived by
+PBKDF2-HMAC-SHA-256 (600,000 iterations, random 128-bit salt). The non-exportable key is kept as a
+`CryptoKey` in the extension's IndexedDB, so automations keep access across panel closes and worker and
+Chrome restarts, with no stored passphrase. Trusted extension code reads one value with
+`await CAPURNION_VAULT_ACCESS.getSecret("exact-secret-name")`, fresh on every call; the
+[Security model](#security-model) says where decrypted values go.
+
+**Lock management** protects viewing and editing in the panel, not automation access. Closing the
+panel, or five idle minutes, clears its secret fields, decrypted entries and key reference. Keep the
+passphrase safe: it is not stored. A lost device key is restored by unlocking management, without
+losing secrets, and a failed write leaves the previous passphrase and secrets usable. Setting
+`vault.enabled` to `false` removes access and the panel but keeps the encrypted vault for later. The
+profile holds the key for automatic decryption, so this does not protect against someone with that
+profile or control of the extension; it is not a hardware-backed key or an OS keychain.
 
 ## Okta sign-in (vault and 2fu)
 
@@ -189,31 +222,19 @@ it only for your own account on your own machine. In the private `rules.json`, b
   origin becomes a host permission. Keep it on a network you trust; it carries codes in the clear.
 
 It takes one action per screen: fill both fields and Sign in; select Phone; ask for the SMS; then poll
-the relay every three seconds for up to two minutes, fill the code and Verify. The password is
-decrypted only in the service worker, which answers only the configured host's top frame; the page
-script checks that the sign-in form is still showing before it types, and clears its copies after. If
+the relay every three seconds for up to two minutes, fill the code and Verify. The service worker
+decrypts the two secrets and hands them only to this content script, in the top frame of a page on
+the Okta host. The script checks that the sign-in form is still showing, types them in and clears its
+own copies; from then on the page can read the password (see [Security model](#security-model)). If
 the vault cannot supply the credentials yet, it tries again 30 seconds later. To set it up, save the
 two secrets, unlock vault management once so the device has automation access, then sync and reload.
 
-## Snowflake tokens and the vault
+## Snowflake token renewal
 
-### Hourly token renewal
-
-Each hour this opens a **new, inactive tab** on one account's Authentication settings page. Your SSO
-rules run as usual through the login redirects, and renewal starts only once the Programmatic access
-tokens section loads. The tab closes after the check, even a failed one; if you switch to it,
-automation stops and leaves it open for you.
-
-For each token on the **Active** list with less than two hours of temporary access left, it opens the
-row's **More options** menu, selects **Bypass requirement for network policy**, fills **24**, picks
-**Hours**, and clicks **Grant access**. It checks the signed-in user, the form and the row before
-submitting, and waits for the same token to show 23–24 hours. Expiration dates do not change. It skips
-tokens at exactly two hours and timers it does not recognise, and works only on the Active list, so
-expired tokens are never selected.
-
-A token whose timer has vanished is recovered the same way. With `restoreMissingAccess: true`, that is
-any Active token with no timer, even with no history. Without it, only when stored history for the
-same name and expiration shows its window has passed, and the page reports a missing network policy.
+Once an hour this opens one Snowflake account's Authentication settings page in a **new, inactive
+tab**, lets your SSO rules sign in, and gives each Active programmatic access token with under two
+hours of network-policy bypass left a fresh 24 hours. The tab closes afterwards; if you switch to it,
+automation stops and leaves it open. In the private `rules.json`, beside `rules`:
 
 ```json
 "snowflakePat": {
@@ -229,56 +250,15 @@ same name and expiration shows its window has passed, and the page reports a mis
 }
 ```
 
-Use the username in the account menu's accessible label, and one exact HTTPS settings URL.
-`confirmGrantsAccess` is your deliberate opt-in to renewing this network-policy exception. The numbers
-are fixed (`validate` rejects others); `pollMinutes` and `restoreMissingAccess` are optional. Run
-`capurnion validate`, `sync`, and reload. The first check runs when the capability loads and on
-browser startup, then hourly. A **five-minute watchdog** also starts one when the last check did not
-succeed, a stored countdown is within two hours of its end, or Okta reports you signed out; a check
-missed during sleep runs after wake. Checks never overlap, and a five-minute deadline ends one that
-cannot finish. **Snowflake must already be signed in, or able to finish its SSO flow.**
-
-If an SSO button turns up after the engine has given up, the check's own tab looks again every five
-seconds for five minutes, on Snowflake's hosts only. With the service worker's approval, it clicks one
-visible button that matches an enabled `idp-select` rule, passes its guards and mentions Okta or SSO.
-
-**With Okta sign-in also on**, each poll checks your Okta session with a cookie-authenticated GET to
-the host's `/api/v1/sessions/me`. A confirmed missing session sends the check's tab to Okta first, where
-Okta sign-in runs; once the session is active, the same tab moves on to Snowflake. A session the
-endpoint cannot confirm shows as **could not verify**, and the check goes ahead through your usual SSO
-flow; this [Okta compatibility API](https://developer.okta.com/docs/guides/oie-upgrade-sessions-api/main/)
-is missing in some deployments.
-
-The toolbar popup shows the last result, each token's timer and expiration, the next hourly check and
-poll, the Okta session state, and **Check now** and **Pause**/**Resume**. **Pause** stops the hourly
-check, the watchdog and sign-in recovery, and cancels a running check. A `!` badge marks a failed check
-or skipped timers, and a failure raises a desktop notification at most once every 30 minutes; clicking
-it opens the Snowflake settings page. Stored: token names, displayed timers and dates, countdown
-deadlines, check results and session status. Set `enabled` to `false`, sync and reload to remove it.
-
-### The local encrypted vault
-
-Add `"vault": { "enabled": true }` beside `rules`, sync, and reload, then open **Settings & vault** from
-the popup or **Extension options** (without renewal on, the toolbar icon opens it). Create a vault with
-a passphrase of at least 12 characters, then add, edit, reveal and delete named secrets. Names and
-values are stored encrypted together in this profile's local extension storage: never in `rules.json`,
-the generated config or browser sync storage.
-
-Encryption is Web Crypto AES-256-GCM with a fresh 96-bit nonce on every save, under a key derived by
-PBKDF2-HMAC-SHA-256 (600,000 iterations, random 128-bit salt). The non-exportable key is kept as a
-`CryptoKey` in the extension's IndexedDB, so automations keep access across panel closes and worker and
-Chrome restarts, with no stored passphrase. Trusted extension code reads one value with
-`await CAPURNION_VAULT_ACCESS.getSecret("exact-secret-name")`, fresh on every call. No message
-endpoint lets a page or content script ask for arbitrary secrets; Okta sign-in hands its two named
-secrets only to its host's top frame.
-
-**Lock management** protects viewing and editing in the panel, not automation access. Closing the
-panel, or five idle minutes, clears its secret fields, decrypted entries and key reference. Keep the
-passphrase safe: it is not stored. A lost device key is restored by unlocking management, without
-losing secrets, and a failed write leaves the previous passphrase and secrets usable. Setting
-`vault.enabled` to `false` removes access and the panel but keeps the encrypted vault for later. The
-profile holds the key for automatic decryption, so this does not protect against someone with that
-profile or control of the extension; it is not a hardware-backed key or an OS keychain.
+`confirmGrantsAccess` is your deliberate opt-in, `expectedUser` must match the account menu's
+accessible label, and the URL must be one exact HTTPS settings page. The numbers are fixed, and
+`validate` rejects others: a check every 60 minutes, renewal below 120 minutes, grants of 24 hours,
+and a watchdog poll every 5 minutes that retries failed checks. `pollMinutes` and
+`restoreMissingAccess` (renew Active tokens whose timer has vanished) are optional. Run
+`capurnion validate`, `sync`, and reload; the toolbar popup shows results, with **Check now** and
+**Pause**. Chrome must be running, and Snowflake signed in or able to finish its SSO flow. The
+[guide](https://bricoleur.ai/projects/capurnion/tokens-and-the-vault) covers token recovery, the
+watchdog, late SSO buttons, the Okta session check, notifications and what is stored.
 
 ## CLI
 

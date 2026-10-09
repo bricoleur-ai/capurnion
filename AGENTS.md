@@ -1,6 +1,6 @@
 # Capurnion — instructions for agents
 
-Capurnion auto-clicks SSO "Sign in with &lt;provider&gt;" buttons. You configure it by
+Capurnion auto-clicks SSO "Sign in with *provider*" buttons. You configure it by
 editing **`rules.json` only**, then running two commands. Never edit `engine.js`,
 `matcher.js`, `manifest.json`, or `rules.generated.js` — the last two are generated and
 your changes will be overwritten.
