@@ -3,7 +3,7 @@
 **Finish the sign-ins you repeat every day: one guarded click by default, and with a local encrypted vault, Okta and token renewals too.**
 
 <!-- bricoleur:intro -->
-> Part of **[bricoleur.ai](https://bricoleur.ai)**: small, honest tools cobbled together from the AI-era parts at hand. Related: **[keeBLEr](https://github.com/shawnrancatore/keeBLEr)**, another tool that works from the browser you already have open.
+> Part of **[bricoleur.ai](https://bricoleur.ai)**: small, honest tools cobbled together from the AI-era parts at hand. Related: **[2fu](https://github.com/bricoleur-ai/2fu)**, the one-shot 2FA code relay it uses to finish Okta sign-ins; **[keeBLEr](https://github.com/shawnrancatore/keeBLEr)**, another tool that works from the browser you already have open.
 <!-- /bricoleur:intro -->
 
 ```mermaid
