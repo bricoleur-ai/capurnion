@@ -26,7 +26,8 @@ flowchart LR
 
 ## The name and delegated authority
 
-The name **capurnion** is inspired by the centurion of Capernaum in
+The name **capurnion** is a portmanteau—a blend of **Capernaum** and **centurion**—inspired by
+the centurion of Capernaum in
 [Matthew 8:5–13](https://www.biblegateway.com/passage/?search=Matthew%208%3A5-13&version=KJV).
 Asking Jesus to heal his servant, the centurion explains that he serves under authority and
 has soldiers under him: a command can be carried out without the commander being present.
