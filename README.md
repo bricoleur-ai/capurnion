@@ -24,6 +24,20 @@ flowchart LR
 - **Keeps one Snowflake account's programmatic access tokens usable, if you opt in.** An hourly check
   in a background tab resets any token's network-policy bypass to 24 hours once under two hours remain.
 
+## The name and delegated authority
+
+The name **capurnion** is inspired by the centurion of Capernaum in
+[Matthew 8:5–13](https://www.biblegateway.com/passage/?search=Matthew%208%3A5-13&version=KJV).
+Asking Jesus to heal his servant, the centurion explains that he serves under authority and
+has soldiers under him: a command can be carried out without the commander being present.
+He recognises Jesus' authority to heal with a word, without coming to his home.
+
+That picture of delegated authority gives the tool its name. You decide which task to hand over;
+capurnion carries out the configured step. For a click rule, you name the hosts, page guards and
+button label, then enable the rule. The extension clicks when those conditions match. A rule that
+grants account access needs an additional explicit confirmation. The delegation is a specific
+instruction within a scope you set, rather than permission to decide what access you want.
+
 ## Quick start
 
 You need Chrome and Python 3. Node is needed only for `capurnion test` and the test suite.
